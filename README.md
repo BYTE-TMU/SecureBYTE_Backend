@@ -23,31 +23,126 @@
 ## Environment Variables
 - `FIREBASE_SERVICE_ACCOUNT`: Path to your Firebase service account JSON file. **Required.**
 
+## Database Schema
+
+The application uses Firebase Realtime Database with the following structure:
+
+```
+users/
+  {user_id}/
+    projects/
+      {project_id}/
+        - projectid (UUID)
+        - project_name (string, required)
+        - project_desc (string, optional)
+        - fileids (array of submission UUIDs)
+        - created_at (ISO timestamp)
+        - updated_at (ISO timestamp)
+    submissions/
+      {submission_id}/
+        - id (UUID)
+        - projectid (UUID reference to parent project)
+        - filename (string, required)
+        - code (string, optional)
+        - securityrev (array of strings - LLM security review output)
+        - logicrev (array of strings - LLM logic review output)
+        - testcases (array of strings - LLM test cases output)
+        - reviewpdf (string - path/identifier for LaTeX-generated PDF)
+        - created_at (ISO timestamp)
+        - updated_at (ISO timestamp)
+```
+
 ## API Endpoints
 
 ### Home
 - `GET /`
   - Returns a welcome message.
 
-### Create Item
-- `POST /items`
-  - **Body:** JSON object representing the item.
-  - **Response:** `{ "id": <item_id>, "message": "Item created" }`
+### Projects
 
-### Get All Items
-- `GET /items`
-  - **Response:** List of all items in the database.
+#### Create Project
+- `POST /users/{user_id}/projects`
+  - **Body:** 
+    ```json
+    {
+      "project_name": "string (required)",
+      "project_desc": "string (optional)"
+    }
+    ```
+  - **Response:** `{ "projectid": "<uuid>", "message": "Project created successfully" }`
 
-### Update Item
-- `PUT /items/<item_id>`
-  - **Body:** JSON object with fields to update.
-  - **Response:** `{ "message": "Item updated" }`
+#### Get All Projects for User
+- `GET /users/{user_id}/projects`
+  - **Response:** Array of project objects
 
-### Delete Item
-- `DELETE /items/<item_id>`
-  - **Response:** `{ "message": "Item deleted" }`
+#### Get Specific Project
+- `GET /users/{user_id}/projects/{project_id}`
+  - **Response:** Project object or 404 if not found
+
+#### Update Project
+- `PUT /users/{user_id}/projects/{project_id}`
+  - **Body:** JSON object with fields to update
+  - **Response:** `{ "message": "Project updated successfully" }`
+
+#### Delete Project
+- `DELETE /users/{user_id}/projects/{project_id}`
+  - **Response:** `{ "message": "Project and related submissions deleted successfully" }`
+  - **Note:** This also deletes all submissions associated with the project
+
+### Submissions
+
+#### Create Submission
+- `POST /users/{user_id}/projects/{project_id}/submissions`
+  - **Body:**
+    ```json
+    {
+      "filename": "string (required)",
+      "code": "string (optional)",
+      "securityrev": ["array of strings (optional)"],
+      "logicrev": ["array of strings (optional)"],
+      "testcases": ["array of strings (optional)"],
+      "reviewpdf": "string (optional)"
+    }
+    ```
+  - **Response:** `{ "id": "<uuid>", "message": "Submission created successfully" }`
+
+#### Get All Submissions for Project
+- `GET /users/{user_id}/projects/{project_id}/submissions`
+  - **Response:** Array of submission objects for the specified project
+
+#### Get Specific Submission
+- `GET /users/{user_id}/submissions/{submission_id}`
+  - **Response:** Submission object or 404 if not found
+
+#### Update Submission
+- `PUT /users/{user_id}/submissions/{submission_id}`
+  - **Body:** JSON object with fields to update
+  - **Response:** `{ "message": "Submission updated successfully" }`
+
+#### Delete Submission
+- `DELETE /users/{user_id}/submissions/{submission_id}`
+  - **Response:** `{ "message": "Submission deleted successfully" }`
+  - **Note:** This also removes the submission ID from the parent project's fileids array
+
+## Data Features
+
+- **User Isolation:** All data is scoped to individual users via `user_id`
+- **UUID Generation:** Projects and submissions automatically receive unique UUIDs
+- **Automatic Timestamps:** `created_at` and `updated_at` fields are managed automatically
+- **Referential Integrity:** Projects maintain references to their submissions via `fileids` array
+- **Cascading Deletes:** Deleting a project removes all associated submissions
+- **Array Support:** Supports arrays for LLM outputs (security reviews, logic reviews, test cases)
+
+## Error Handling
+
+- **400 Bad Request:** Missing required fields
+- **404 Not Found:** Resource doesn't exist
+- **201 Created:** Successful resource creation
+- **200 OK:** Successful operation
 
 ## Notes
 - The backend uses Firebase Realtime Database for storage.
 - CORS is enabled for all routes.
+- All timestamps are in ISO format.
+- UUIDs are automatically generated for projects and submissions.
 - This server is for development purposes. For production, use a production-ready WSGI server.
