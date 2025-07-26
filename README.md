@@ -7,16 +7,23 @@
    ```sh
    pip install -r requirements.txt
    ```
-3. **Download your Firebase service account JSON file** from the Firebase Console and place it in the project directory.
+3. **Add your Firebase service account JSON file:**
+   - Download your Firebase service account JSON from the Firebase Console.
+   - Place it in the project directory and rename it to `firebase.json` (or use your preferred name, but update the path accordingly).
 4. **Set the environment variable** before running the app (replace the path with your actual file path):
    - **Windows PowerShell:**
      ```powershell
-     $env:FIREBASE_SERVICE_ACCOUNT="C:\\path\\to\\your\\serviceAccount.json"
+     $env:FIREBASE_SERVICE_ACCOUNT="C:\\path\\to\\your\\firebase.json"
      python app.py
      ```
    - **Linux/macOS:**
      ```sh
-     export FIREBASE_SERVICE_ACCOUNT="/path/to/your/serviceAccount.json"
+     export FIREBASE_SERVICE_ACCOUNT="/path/to/your/firebase.json"
+     python app.py
+     ```
+   - Or, if your `firebase.json` is in the project root, you can use:
+     ```sh
+     export FIREBASE_SERVICE_ACCOUNT="$(pwd)/firebase.json"
      python app.py
      ```
 
@@ -143,6 +150,3 @@ users/
 ## Notes
 - The backend uses Firebase Realtime Database for storage.
 - CORS is enabled for all routes.
-- All timestamps are in ISO format.
-- UUIDs are automatically generated for projects and submissions.
-- This server is for development purposes. For production, use a production-ready WSGI server.
