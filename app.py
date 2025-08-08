@@ -273,31 +273,34 @@ def handle_llm_review(review_type, user_id, project_id, data):
 
         response = llm.generate_response(user_prompt=prompt)
 
+        # Join all streamed chunks into a single string
+    
+        full_response = ''.join(response.system_prompt)
+
         return jsonify({
             "success": True,
             "review_type": review_type,
             "user_id": user_id,
             "project_id": project_id,
-            "provider": provider,
-            "response": response
+            "response": full_response
         })
-
+    
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 
 # Route for logic review
-@app.route('/api/ai/<user_id>/projects/<project_id>/logic-review', methods=['POST'])
+@app.route('/ai/<user_id>/projects/<project_id>/logic-review', methods=['POST'])
 def logic_review(user_id, project_id):
     return handle_llm_review("logic", user_id, project_id, request.get_json())
 
 # Route for test case review
-@app.route('/api/ai/<user_id>/projects/<project_id>/testing-review', methods=['POST'])
+@app.route('/ai/<user_id>/projects/<project_id>/testing-review', methods=['POST'])
 def testing_review(user_id, project_id):
     return handle_llm_review("testing", user_id, project_id, request.get_json())
 
 # Route for security review
-@app.route('/api/ai/<user_id>/projects/<project_id>/security-review', methods=['POST'])
+@app.route('/ai/<user_id>/projects/<project_id>/security-review', methods=['POST'])
 def security_review(user_id, project_id):
     return handle_llm_review("security", user_id, project_id, request.get_json())
 
