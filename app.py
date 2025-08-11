@@ -277,13 +277,7 @@ def handle_llm_review(review_type, user_id, project_id, data):
     
         full_response = ''.join(response.system_prompt)
 
-        return jsonify({
-            "success": True,
-            "review_type": review_type,
-            "user_id": user_id,
-            "project_id": project_id,
-            "response": full_response
-        })
+        return full_response
     
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -292,18 +286,95 @@ def handle_llm_review(review_type, user_id, project_id, data):
 # Route for logic review
 @app.route('/ai/<user_id>/projects/<project_id>/logic-review', methods=['POST'])
 def logic_review(user_id, project_id):
-    return handle_llm_review("logic", user_id, project_id, request.get_json())
+
+    ref = db.reference(f'users/{user_id}/projects/{project_id}')
+    
+    # Check if project exists
+    project_data = ref.get()
+    if not project_data:
+        return jsonify({'error': 'Project not found'}), 404
+    
+    #get response from llm 
+    llm_review = handle_llm_review("logic", user_id, project_id, request.get_json())
+
+    # Append new review 
+    logic_rev = project_data.get('logicrev', [])
+    logic_rev.append({
+        "timestamp": get_timestamp(),
+        "review": llm_review
+    })
+    ref.update({
+        "logicrev": logic_rev
+    })
+
+    return jsonify({
+        "success": True,
+        "review_type": "logic",
+        "user_id": user_id,
+        "project_id": project_id,
+        "response": llm_review
+    })
 
 # Route for test case review
 @app.route('/ai/<user_id>/projects/<project_id>/testing-review', methods=['POST'])
 def testing_review(user_id, project_id):
-    return handle_llm_review("testing", user_id, project_id, request.get_json())
+    ref = db.reference(f'users/{user_id}/projects/{project_id}')
+    
+    # Check if project exists
+    project_data = ref.get()
+    if not project_data:
+        return jsonify({'error': 'Project not found'}), 404
+    
+    llm_review = handle_llm_review("testing", user_id, project_id, request.get_json())
+    
+    # Append new review 
+    test_rev = project_data.get('testingrev', [])
+    test_rev.append({
+        "timestamp": get_timestamp(),
+        "review": llm_review
+    })
+    ref.update({
+        "testingrev": test_rev
+    })
+
+    return jsonify({
+        "success": True,
+        "review_type": "testing",
+        "user_id": user_id,
+        "project_id": project_id,
+        "response": llm_review
+    })
 
 # Route for security review
 @app.route('/ai/<user_id>/projects/<project_id>/security-review', methods=['POST'])
 def security_review(user_id, project_id):
-    return handle_llm_review("security", user_id, project_id, request.get_json())
 
+    ref = db.reference(f'users/{user_id}/projects/{project_id}')
+    
+    # Check if project exists
+    project_data = ref.get()
+    if not project_data:
+        return jsonify({'error': 'Project not found'}), 404
+    
+    llm_review = handle_llm_review("security", user_id, project_id, request.get_json())
+
+    # Append new review
+    sec_rev = project_data.get('securityrev', [])
+    sec_rev.append({
+        "timestamp": get_timestamp(),
+        "review": llm_review
+    })
+    ref.update({
+        "securityrev": sec_rev
+    })  
+
+    return jsonify({
+        "success": True,
+        "review_type": "security",
+        "user_id": user_id,
+        "project_id": project_id,
+        "response": llm_review
+    })
 
 if __name__ == '__main__':
     app.run(debug=True)
