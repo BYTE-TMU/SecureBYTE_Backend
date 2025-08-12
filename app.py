@@ -1,6 +1,6 @@
 import firebase_admin
 from firebase_admin import credentials, db
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import os
 import uuid
@@ -251,6 +251,130 @@ def delete_submission(user_id, submission_id):
     submission_ref.delete()
     
     return jsonify({'message': 'Submission deleted successfully'})
+
+# Common Route handler for LLM reviews 
+
+def handle_llm_review(review_type, user_id, project_id, data):
+    """Handle LLM review requests"""
+    code = data.get('code')       
+
+    if not code:
+        return jsonify({"success": False, "error": "Missing 'code'"}), 400
+
+    try:
+        if review_type == "logic":
+            prompt = f"Review the following code for correctness and logic errors:\n\n{code}"
+        elif review_type == "testing":
+            prompt = f"Review the following test code. Check test quality, coverage, and missing edge cases:\n\n{code}"
+        elif review_type == "security":
+            prompt = f"Review this code for potential security issues and suggest improvements:\n\n{code}"
+        else:
+            return jsonify({"success": False, "error": "Invalid review type"}), 400
+
+        response = llm.generate_response(user_prompt=prompt)
+
+        # Join all streamed chunks into a single string
+    
+        full_response = ''.join(response.system_prompt)
+
+        return full_response
+    
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# Route for logic review
+@app.route('/ai/<user_id>/projects/<project_id>/logic-review', methods=['POST'])
+def logic_review(user_id, project_id):
+
+    ref = db.reference(f'users/{user_id}/projects/{project_id}')
+    
+    # Check if project exists
+    project_data = ref.get()
+    if not project_data:
+        return jsonify({'error': 'Project not found'}), 404
+    
+    #get response from llm 
+    llm_review = handle_llm_review("logic", user_id, project_id, request.get_json())
+
+    # Append new review 
+    logic_rev = project_data.get('logicrev', [])
+    logic_rev.append({
+        "timestamp": get_timestamp(),
+        "review": llm_review
+    })
+    ref.update({
+        "logicrev": logic_rev
+    })
+
+    return jsonify({
+        "success": True,
+        "review_type": "logic",
+        "user_id": user_id,
+        "project_id": project_id,
+        "response": llm_review
+    })
+
+# Route for test case review
+@app.route('/ai/<user_id>/projects/<project_id>/testing-review', methods=['POST'])
+def testing_review(user_id, project_id):
+    ref = db.reference(f'users/{user_id}/projects/{project_id}')
+    
+    # Check if project exists
+    project_data = ref.get()
+    if not project_data:
+        return jsonify({'error': 'Project not found'}), 404
+    
+    llm_review = handle_llm_review("testing", user_id, project_id, request.get_json())
+    
+    # Append new review 
+    test_rev = project_data.get('testingrev', [])
+    test_rev.append({
+        "timestamp": get_timestamp(),
+        "review": llm_review
+    })
+    ref.update({
+        "testingrev": test_rev
+    })
+
+    return jsonify({
+        "success": True,
+        "review_type": "testing",
+        "user_id": user_id,
+        "project_id": project_id,
+        "response": llm_review
+    })
+
+# Route for security review
+@app.route('/ai/<user_id>/projects/<project_id>/security-review', methods=['POST'])
+def security_review(user_id, project_id):
+
+    ref = db.reference(f'users/{user_id}/projects/{project_id}')
+    
+    # Check if project exists
+    project_data = ref.get()
+    if not project_data:
+        return jsonify({'error': 'Project not found'}), 404
+    
+    llm_review = handle_llm_review("security", user_id, project_id, request.get_json())
+
+    # Append new review
+    sec_rev = project_data.get('securityrev', [])
+    sec_rev.append({
+        "timestamp": get_timestamp(),
+        "review": llm_review
+    })
+    ref.update({
+        "securityrev": sec_rev
+    })  
+
+    return jsonify({
+        "success": True,
+        "review_type": "security",
+        "user_id": user_id,
+        "project_id": project_id,
+        "response": llm_review
+    })
 
 if __name__ == '__main__':
     app.run(debug=True)
