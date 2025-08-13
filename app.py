@@ -13,12 +13,13 @@ if securebyte_ai_path not in sys.path:
     sys.path.insert(0, securebyte_ai_path)
 
 try:
-    from main import LLMManager
+    from SecureBYTE_AI.main import LLMManager
     LLM_AVAILABLE = True
 except ImportError as e:
     print(f"Warning: Could not import LLMManager: {e}")
     LLMManager = None
     LLM_AVAILABLE = False
+
 
 # Get the database URL from environment variable
 SERVICE_ACCOUNT_PATH = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
@@ -278,95 +279,37 @@ def delete_submission(user_id, submission_id):
 
 # Common Route handler for LLM reviews 
 
-def handle_llm_review(review_type, user_id, identifier, data):
+def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     """Handle LLM review requests"""
-    # Check if LLM is available
-    if not llm:
-        return {
-            "success": False, 
-            "error": "LLM service is not available. Please check dependencies."
-        }
-    
-    code = data.get('code')
-    provider = data.get('provider', 'openai')  # Default to openai if not specified
+    code = data.get('code')       
 
     if not code:
-        return {"success": False, "error": "Missing 'code'"}
+        return jsonify({"success": False, "error": "Missing 'code'"}), 400
 
     try:
-        # Switch to the requested provider
-        llm.switch_provider(provider)
-
-        # Enhanced prompts for better code review
         if review_type == "logic":
-            prompt = f"""Please perform a thorough logic review of the following code.
-
-Focus on:
-1. Logic errors and potential bugs
-2. Code correctness and functionality
-3. Edge cases that might not be handled
-4. Performance issues
-5. Code structure and clarity
-
-Code to review:
-{code}
-
-Please provide specific feedback with suggestions for improvement."""
-
+            prompt = f"Review the following code for correctness and logic errors:\n\n{code}"
         elif review_type == "testing":
-            prompt = f"""Please review the following test code.
-
-Focus on:
-1. Test coverage - are all important scenarios tested?
-2. Test quality - are tests well-written and maintainable?
-3. Missing edge cases and boundary conditions
-4. Test structure and organization
-5. Assertions and test data quality
-
-Code to review:
-{code}
-
-Please suggest improvements and identify missing test cases."""
-
+            prompt = f"Review the following test code. Check test quality, coverage, and missing edge cases:\n\n{code}"
         elif review_type == "security":
-            prompt = f"""Please perform a comprehensive security review of the following code.
-
-Focus on:
-1. Injection vulnerabilities (SQL, XSS, command injection)
-2. Authentication and authorization issues
-3. Input validation and sanitization
-4. Data exposure and privacy concerns
-5. Cryptography and secure communication
-6. Error handling that might leak information
-
-Code to review:
-{code}
-
-Please provide specific security recommendations and severity levels for any issues found."""
-
+            prompt = f"Review this code for potential security issues and suggest improvements:\n\n{code}"
         else:
-            return {"success": False, "error": "Invalid review type"}
+            return jsonify({"success": False, "error": "Invalid review type"}), 400
 
         response = llm.generate_response(user_prompt=prompt)
 
-        # Handle the response properly - check if it's a generator or string
-        if hasattr(response, '__iter__') and not isinstance(response, str):
-            full_response = ''.join(response)
-        else:
-            full_response = str(response)
+        # Join all streamed chunks into a single string
+    
+        full_response = ''.join(response.system_prompt)
 
-        return {
-            "success": True,
-            "review": full_response,
-            "provider": provider
-        }
+        return full_response
     
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # Route for logic review
-@app.route('/ai/<user_id>/submissions/<submission_id>/logic-review', methods=['POST'])
+@app.route('/users/<user_id>/submissions/<submission_id>/logic-review', methods=['POST'])
 def logic_review(user_id, submission_id):
 
     ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
@@ -397,8 +340,9 @@ def logic_review(user_id, submission_id):
     })
 
 # Route for test case review
-@app.route('/ai/<user_id>/submissions/<submission_id>/testing-review', methods=['POST'])
+@app.route('/users/<user_id>/submissions/<submission_id>/testing-review', methods=['POST'])
 def testing_review(user_id, submission_id):
+    
     ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
     
     # Check if submission exists
@@ -425,10 +369,8 @@ def testing_review(user_id, submission_id):
         "response": llm_review
     })
 
-
-
-# Route for security review - for 
-@app.route('/ai/<user_id>/projects/<project_id>/security-review', methods=['POST'])
+# Route for security review 
+@app.route('/users/<user_id>/projects/<project_id>/security-review', methods=['POST'])
 def security_review(user_id, project_id):
 
     ref = db.reference(f'users/{user_id}/projects/{project_id}')
