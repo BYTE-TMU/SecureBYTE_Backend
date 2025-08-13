@@ -252,6 +252,420 @@ def delete_submission(user_id, submission_id):
     
     return jsonify({'message': 'Submission deleted successfully'})
 
+
+# History endpoints
+
+@app.route('/users/<user_id>/history', methods=['GET'])
+def get_user_history(user_id):
+    """Get complete history of all user activities"""
+    # Get all projects and submissions
+    projects_ref = db.reference(f'users/{user_id}/projects')
+    submissions_ref = db.reference(f'users/{user_id}/submissions')
+    
+    projects = projects_ref.get() or {}
+    submissions = submissions_ref.get() or {}
+    
+    # Create history entries
+    history = []
+    
+    # Add project creation events
+    for project_id, project in projects.items():
+        history.append({
+            'type': 'project_created',
+            'id': project_id,
+            'name': project.get('project_name', ''),
+            'timestamp': project.get('created_at', ''),
+            'description': project.get('project_desc', '')
+        })
+        
+        # Add project update events
+        if project.get('updated_at') and project.get('updated_at') != project.get('created_at'):
+            history.append({
+                'type': 'project_updated',
+                'id': project_id,
+                'name': project.get('project_name', ''),
+                'timestamp': project.get('updated_at', ''),
+                'description': project.get('project_desc', '')
+            })
+    
+    # Add submission events
+    for submission_id, submission in submissions.items():
+        history.append({
+            'type': 'submission_created',
+            'id': submission_id,
+            'project_id': submission.get('projectid', ''),
+            'filename': submission.get('filename', ''),
+            'timestamp': submission.get('created_at', '')
+        })
+        
+        # Add submission update events
+        if submission.get('updated_at') and submission.get('updated_at') != submission.get('created_at'):
+            history.append({
+                'type': 'submission_updated',
+                'id': submission_id,
+                'project_id': submission.get('projectid', ''),
+                'filename': submission.get('filename', ''),
+                'timestamp': submission.get('updated_at', '')
+            })
+    
+    # Sort by timestamp (newest first)
+    history.sort(key=lambda x: x['timestamp'], reverse=True)
+    
+    return jsonify(history)
+
+@app.route('/users/<user_id>/projects/<project_id>/history', methods=['GET'])
+def get_project_history(user_id, project_id):
+    """Get history for a specific project"""
+    # Check if project exists
+    project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
+    project = project_ref.get()
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    
+    # Get all submissions for this project
+    submissions_ref = db.reference(f'users/{user_id}/submissions')
+    all_submissions = submissions_ref.get() or {}
+    
+    history = []
+    
+    # Add project events
+    history.append({
+        'type': 'project_created',
+        'id': project_id,
+        'name': project.get('project_name', ''),
+        'timestamp': project.get('created_at', ''),
+        'description': project.get('project_desc', '')
+    })
+    
+    if project.get('updated_at') and project.get('updated_at') != project.get('created_at'):
+        history.append({
+            'type': 'project_updated',
+            'id': project_id,
+            'name': project.get('project_name', ''),
+            'timestamp': project.get('updated_at', ''),
+            'description': project.get('project_desc', '')
+        })
+    
+    # Add submission events for this project
+    for submission_id, submission in all_submissions.items():
+        if submission.get('projectid') == project_id:
+            history.append({
+                'type': 'submission_created',
+                'id': submission_id,
+                'filename': submission.get('filename', ''),
+                'timestamp': submission.get('created_at', '')
+            })
+            
+            if submission.get('updated_at') and submission.get('updated_at') != submission.get('created_at'):
+                history.append({
+                    'type': 'submission_updated',
+                    'id': submission_id,
+                    'filename': submission.get('filename', ''),
+                    'timestamp': submission.get('updated_at', '')
+                })
+    
+    # Sort by timestamp (newest first)
+    history.sort(key=lambda x: x['timestamp'], reverse=True)
+    
+    return jsonify(history)
+
+# Metrics endpoints
+
+@app.route('/users/<user_id>/metrics', methods=['GET'])
+def get_user_metrics(user_id):
+    """Get comprehensive metrics for a user"""
+    projects_ref = db.reference(f'users/{user_id}/projects')
+    submissions_ref = db.reference(f'users/{user_id}/submissions')
+    
+    projects = projects_ref.get() or {}
+    submissions = submissions_ref.get() or {}
+    
+    # Calculate metrics
+    total_projects = len(projects)
+    total_submissions = len(submissions)
+    
+    # Count security and logic reviews
+    total_security_reviews = 0
+    total_logic_reviews = 0
+    total_test_cases = 0
+    
+    # Count issues by severity
+    severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+    
+    for submission in submissions.values():
+        # Count reviews
+        if submission.get('securityrev'):
+            total_security_reviews += len(submission['securityrev'])
+            # Parse security reviews for severity counts
+            for review in submission['securityrev']:
+                try:
+                    if isinstance(review, str):
+                        import json
+                        review_data = json.loads(review)
+                        for file_data in review_data.get('files', []):
+                            for issue in file_data.get('issues', []):
+                                severity = issue.get('severity', {}).get('level', 'low')
+                                if severity in severity_counts:
+                                    severity_counts[severity] += 1
+                except:
+                    pass
+        
+        if submission.get('logicrev'):
+            total_logic_reviews += len(submission['logicrev'])
+        
+        if submission.get('testcases'):
+            total_test_cases += len(submission['testcases'])
+    
+    # Calculate average issues per submission
+    avg_issues_per_submission = 0
+    if total_submissions > 0:
+        total_issues = sum(severity_counts.values())
+        avg_issues_per_submission = total_issues / total_submissions
+    
+    # Get recent activity (last 30 days)
+    from datetime import datetime, timedelta
+    thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat()
+    
+    recent_projects = 0
+    recent_submissions = 0
+    
+    for project in projects.values():
+        if project.get('created_at', '') >= thirty_days_ago:
+            recent_projects += 1
+    
+    for submission in submissions.values():
+        if submission.get('created_at', '') >= thirty_days_ago:
+            recent_submissions += 1
+    
+    metrics = {
+        'total_projects': total_projects,
+        'total_submissions': total_submissions,
+        'total_security_reviews': total_security_reviews,
+        'total_logic_reviews': total_logic_reviews,
+        'total_test_cases': total_test_cases,
+        'severity_distribution': severity_counts,
+        'avg_issues_per_submission': round(avg_issues_per_submission, 2),
+        'recent_activity': {
+            'projects_last_30_days': recent_projects,
+            'submissions_last_30_days': recent_submissions
+        }
+    }
+    
+    return jsonify(metrics)
+
+@app.route('/users/<user_id>/projects/<project_id>/metrics', methods=['GET'])
+def get_project_metrics(user_id, project_id):
+    """Get metrics for a specific project"""
+    # Check if project exists
+    project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
+    project = project_ref.get()
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    
+    # Get submissions for this project
+    submissions_ref = db.reference(f'users/{user_id}/submissions')
+    all_submissions = submissions_ref.get() or {}
+    
+    project_submissions = []
+    for submission_id, submission in all_submissions.items():
+        if submission.get('projectid') == project_id:
+            project_submissions.append(submission)
+    
+    # Calculate project-specific metrics
+    total_submissions = len(project_submissions)
+    total_security_reviews = 0
+    total_logic_reviews = 0
+    total_test_cases = 0
+    
+    severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+    
+    for submission in project_submissions:
+        if submission.get('securityrev'):
+            total_security_reviews += len(submission['securityrev'])
+            # Parse security reviews for severity counts
+            for review in submission['securityrev']:
+                try:
+                    if isinstance(review, str):
+                        import json
+                        review_data = json.loads(review)
+                        for file_data in review_data.get('files', []):
+                            for issue in file_data.get('issues', []):
+                                severity = issue.get('severity', {}).get('level', 'low')
+                                if severity in severity_counts:
+                                    severity_counts[severity] += 1
+                except:
+                    pass
+        
+        if submission.get('logicrev'):
+            total_logic_reviews += len(submission['logicrev'])
+        
+        if submission.get('testcases'):
+            total_test_cases += len(submission['testcases'])
+    
+    # Calculate average issues per submission
+    avg_issues_per_submission = 0
+    if total_submissions > 0:
+        total_issues = sum(severity_counts.values())
+        avg_issues_per_submission = total_issues / total_submissions
+    
+    metrics = {
+        'project_name': project.get('project_name', ''),
+        'project_description': project.get('project_desc', ''),
+        'total_submissions': total_submissions,
+        'total_security_reviews': total_security_reviews,
+        'total_logic_reviews': total_logic_reviews,
+        'total_test_cases': total_test_cases,
+        'severity_distribution': severity_counts,
+        'avg_issues_per_submission': round(avg_issues_per_submission, 2),
+        'created_at': project.get('created_at', ''),
+        'updated_at': project.get('updated_at', '')
+    }
+    
+    return jsonify(metrics)
+
+# Dashboard endpoints
+
+@app.route('/users/<user_id>/dashboard', methods=['GET'])
+def get_user_dashboard(user_id):
+    """Get comprehensive dashboard data for a user"""
+    projects_ref = db.reference(f'users/{user_id}/projects')
+    submissions_ref = db.reference(f'users/{user_id}/submissions')
+    
+    projects = projects_ref.get() or {}
+    submissions = submissions_ref.get() or {}
+    
+    # Get recent projects (last 5)
+    recent_projects = []
+    for project_id, project in projects.items():
+        recent_projects.append({
+            'id': project_id,
+            'name': project.get('project_name', ''),
+            'description': project.get('project_desc', ''),
+            'submission_count': len(project.get('fileids', [])),
+            'created_at': project.get('created_at', ''),
+            'updated_at': project.get('updated_at', '')
+        })
+    
+    # Sort by updated_at (most recent first) and take top 5
+    recent_projects.sort(key=lambda x: x['updated_at'], reverse=True)
+    recent_projects = recent_projects[:5]
+    
+    # Get recent submissions (last 10)
+    recent_submissions = []
+    for submission_id, submission in submissions.items():
+        recent_submissions.append({
+            'id': submission_id,
+            'project_id': submission.get('projectid', ''),
+            'filename': submission.get('filename', ''),
+            'created_at': submission.get('created_at', ''),
+            'updated_at': submission.get('updated_at', ''),
+            'has_security_review': len(submission.get('securityrev', [])) > 0,
+            'has_logic_review': len(submission.get('logicrev', [])) > 0,
+            'has_test_cases': len(submission.get('testcases', [])) > 0
+        })
+    
+    # Sort by updated_at (most recent first) and take top 10
+    recent_submissions.sort(key=lambda x: x['updated_at'], reverse=True)
+    recent_submissions = recent_submissions[:10]
+    
+    # Calculate quick stats
+    total_projects = len(projects)
+    total_submissions = len(submissions)
+    
+    # Count reviews
+    total_security_reviews = sum(len(s.get('securityrev', [])) for s in submissions.values())
+    total_logic_reviews = sum(len(s.get('logicrev', [])) for s in submissions.values())
+    total_test_cases = sum(len(s.get('testcases', [])) for s in submissions.values())
+    
+    # Get activity in last 7 days
+    from datetime import datetime, timedelta
+    seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
+    
+    recent_activity = {
+        'projects_created': sum(1 for p in projects.values() if p.get('created_at', '') >= seven_days_ago),
+        'submissions_created': sum(1 for s in submissions.values() if s.get('created_at', '') >= seven_days_ago)
+    }
+    
+    dashboard_data = {
+        'quick_stats': {
+            'total_projects': total_projects,
+            'total_submissions': total_submissions,
+            'total_security_reviews': total_security_reviews,
+            'total_logic_reviews': total_logic_reviews,
+            'total_test_cases': total_test_cases
+        },
+        'recent_activity': recent_activity,
+        'recent_projects': recent_projects,
+        'recent_submissions': recent_submissions
+    }
+    
+    return jsonify(dashboard_data)
+
+@app.route('/users/<user_id>/dashboard/summary', methods=['GET'])
+def get_dashboard_summary(user_id):
+    """Get a quick summary for the dashboard"""
+    projects_ref = db.reference(f'users/{user_id}/projects')
+    submissions_ref = db.reference(f'users/{user_id}/submissions')
+    
+    projects = projects_ref.get() or {}
+    submissions = submissions_ref.get() or {}
+    
+    # Calculate summary stats
+    total_projects = len(projects)
+    total_submissions = len(submissions)
+    
+    # Count issues by severity across all submissions
+    severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+    
+    for submission in submissions.values():
+        for review in submission.get('securityrev', []):
+            try:
+                if isinstance(review, str):
+                    import json
+                    review_data = json.loads(review)
+                    for file_data in review_data.get('files', []):
+                        for issue in file_data.get('issues', []):
+                            severity = issue.get('severity', {}).get('level', 'low')
+                            if severity in severity_counts:
+                                severity_counts[severity] += 1
+            except:
+                pass
+    
+    # Get most critical issues (top 3)
+    critical_issues = []
+    for submission in submissions.values():
+        for review in submission.get('securityrev', []):
+            try:
+                if isinstance(review, str):
+                    import json
+                    review_data = json.loads(review)
+                    for file_data in review_data.get('files', []):
+                        for issue in file_data.get('issues', []):
+                            if issue.get('severity', {}).get('level') in ['critical', 'high']:
+                                critical_issues.append({
+                                    'filename': file_data.get('filename', ''),
+                                    'line': issue.get('line', 0),
+                                    'feedback': issue.get('feedback', ''),
+                                    'severity': issue.get('severity', {}).get('level', ''),
+                                    'submission_id': submission.get('id', '')
+                                })
+            except:
+                pass
+    
+    # Sort by severity and take top 3
+    critical_issues.sort(key=lambda x: {'critical': 4, 'high': 3, 'medium': 2, 'low': 1}.get(x['severity'], 0), reverse=True)
+    critical_issues = critical_issues[:3]
+    
+    summary = {
+        'total_projects': total_projects,
+        'total_submissions': total_submissions,
+        'total_issues': sum(severity_counts.values()),
+        'severity_breakdown': severity_counts,
+        'critical_issues': critical_issues
+    }
+    
+    return jsonify(summary)
+
 # Common Route handler for LLM reviews 
 
 def handle_llm_review(review_type, user_id, project_id, data):
@@ -375,6 +789,7 @@ def security_review(user_id, project_id):
         "project_id": project_id,
         "response": llm_review
     })
+
 
 if __name__ == '__main__':
     app.run(debug=True)
