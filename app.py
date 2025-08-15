@@ -5,6 +5,7 @@ from flask_cors import CORS
 import os
 import sys
 import uuid
+import json
 from datetime import datetime
 
 # Add the SecureBYTE_AI directory to the Python path
@@ -19,7 +20,6 @@ except ImportError as e:
     print(f"Warning: Could not import LLMManager: {e}")
     LLMManager = None
     LLM_AVAILABLE = False
-
 
 # Get the database URL from environment variable
 SERVICE_ACCOUNT_PATH = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
@@ -44,6 +44,12 @@ if LLM_AVAILABLE and LLMManager:
     except Exception as e:
         print(f"Failed to initialize LLM Manager: {e}")
         llm = None
+
+#prompt loader helper function
+def load_prompt(filename):
+    with open(filename, 'r', encoding='utf-8') as f:
+        return f.read()
+
 
 @app.route('/')
 def home():
@@ -286,20 +292,26 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     if not code:
         return jsonify({"success": False, "error": "Missing 'code'"}), 400
 
-    try:
-        if review_type == "logic":
-            prompt = f"Review the following code for correctness and logic errors:\n\n{code}"
-        elif review_type == "testing":
-            prompt = f"Review the following test code. Check test quality, coverage, and missing edge cases:\n\n{code}"
-        elif review_type == "security":
-            prompt = f"Review this code for potential security issues and suggest improvements:\n\n{code}"
-        else:
-            return jsonify({"success": False, "error": "Invalid review type"}), 400
+    PROMPT_PATHS = {
+        "logic": "prompts/logic_prompt.txt",
+        "testing": "prompts/testing_prompt.txt",
+        "security": "prompts/security_prompt.txt"
+    }
 
+    if review_type not in PROMPT_PATHS:
+        return jsonify({"success": False, "error": "Invalid review type"}), 400
+    
+    try:   
+        # Load the correct prompt template for the review type
+        prompt_template = load_prompt(PROMPT_PATHS[review_type])
+
+        # Inject the code into the template
+        prompt = prompt_template.format(code=code)
+
+        # Generate response from LLM
         response = llm.generate_response(user_prompt=prompt)
 
-        # Join all streamed chunks into a single string
-    
+        # Join all streamed chunks into a single string if given as a chunk 
         full_response = ''.join(response.system_prompt)
 
         return full_response
@@ -322,10 +334,15 @@ def logic_review(user_id, submission_id):
     #get response from llm
     llm_review = handle_llm_review("logic", user_id, submission_id, request.get_json())
 
+    try:
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+
     # Append new review
     logic_rev = submission_data.get('logicrev', [])
     logic_rev.append({
-        "review": llm_review
+        "review": llm_review_obj    
     })
     ref.update({
         "logicrev": logic_rev
@@ -336,7 +353,7 @@ def logic_review(user_id, submission_id):
         "review_type": "logic",
         "user_id": user_id,
         "submission_id": submission_id,
-        "response": llm_review
+        "response": llm_review_obj
     })
 
 # Route for test case review
@@ -352,10 +369,15 @@ def testing_review(user_id, submission_id):
 
     llm_review = handle_llm_review("testing", user_id, submission_id, request.get_json())
 
+    try:
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+
     # Append new review 
     test_rev = submission_data.get('testingrev', [])
     test_rev.append({
-        "review": llm_review
+        "review": llm_review_obj
     })
     ref.update({
         "testingrev": test_rev
@@ -366,7 +388,7 @@ def testing_review(user_id, submission_id):
         "review_type": "testing",
         "user_id": user_id,
         "submission_id": submission_id,
-        "response": llm_review
+        "response": llm_review_obj
     })
 
 # Route for security review 
@@ -382,10 +404,15 @@ def security_review(user_id, project_id):
     
     llm_review = handle_llm_review("security", user_id, project_id, request.get_json())
 
+    try:
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+
     # Append new review
     sec_rev = project_data.get('securityrev', [])
     sec_rev.append({
-        "review": llm_review
+        "review": llm_review_obj
     })
     ref.update({
         "securityrev": sec_rev
@@ -396,7 +423,7 @@ def security_review(user_id, project_id):
         "review_type": "security",
         "user_id": user_id,
         "project_id": project_id,
-        "response": llm_review
+        "response": llm_review_obj
     })
 
 if __name__ == '__main__':
