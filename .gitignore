@@ -4,3 +4,4 @@ firebase.json
 .env
 .venv
 venv
+rtdb_migrate_to_v2.py
