@@ -3,11 +3,26 @@ from firebase_admin import credentials, db
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import os
+import sys
 import uuid
+import json
 from datetime import datetime
 import requests
 import base64
 from urllib.parse import urlencode
+
+# Add the SecureBYTE_AI directory to the Python path
+securebyte_ai_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'SecureBYTE_AI'))
+if securebyte_ai_path not in sys.path:
+    sys.path.insert(0, securebyte_ai_path)
+
+try:
+    from SecureBYTE_AI.main import LLMManager
+    LLM_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Could not import LLMManager: {e}")
+    LLMManager = None
+    LLM_AVAILABLE = False
 
 # Get the database URL from environment variable
 SERVICE_ACCOUNT_PATH = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
@@ -23,10 +38,28 @@ firebase_admin.initialize_app(cred, {
 app = Flask(__name__)
 CORS(app)
 
+
 # GitHub OAuth configuration
 GITHUB_CLIENT_ID = os.environ.get('GITHUB_CLIENT_ID')
 GITHUB_CLIENT_SECRET = os.environ.get('GITHUB_CLIENT_SECRET')
 GITHUB_REDIRECT_URI = os.environ.get('GITHUB_REDIRECT_URI')
+
+# Initialize LLM Manager if available
+llm = None
+if LLM_AVAILABLE and LLMManager:
+    try:
+        llm = LLMManager()
+        print("LLM Manager initialized successfully")
+    except Exception as e:
+        print(f"Failed to initialize LLM Manager: {e}")
+        llm = None
+
+#prompt loader helper function
+def load_prompt(filename):
+    with open(filename, 'r', encoding='utf-8') as f:
+        return f.read()
+
+
 
 @app.route('/')
 def home():
@@ -679,27 +712,33 @@ def get_dashboard_summary(user_id):
 
 # Common Route handler for LLM reviews 
 
-def handle_llm_review(review_type, user_id, project_id, data):
+def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     """Handle LLM review requests"""
     code = data.get('code')       
 
     if not code:
         return jsonify({"success": False, "error": "Missing 'code'"}), 400
 
-    try:
-        if review_type == "logic":
-            prompt = f"Review the following code for correctness and logic errors:\n\n{code}"
-        elif review_type == "testing":
-            prompt = f"Review the following test code. Check test quality, coverage, and missing edge cases:\n\n{code}"
-        elif review_type == "security":
-            prompt = f"Review this code for potential security issues and suggest improvements:\n\n{code}"
-        else:
-            return jsonify({"success": False, "error": "Invalid review type"}), 400
+    PROMPT_PATHS = {
+        "logic": "prompts/logic_prompt.txt",
+        "testing": "prompts/testing_prompt.txt",
+        "security": "prompts/security_prompt.txt"
+    }
 
+    if review_type not in PROMPT_PATHS:
+        return jsonify({"success": False, "error": "Invalid review type"}), 400
+    
+    try:   
+        # Load the correct prompt template for the review type
+        prompt_template = load_prompt(PROMPT_PATHS[review_type])
+
+        # Inject the code into the template
+        prompt = prompt_template.format(code=code)
+
+        # Generate response from LLM
         response = llm.generate_response(user_prompt=prompt)
 
-        # Join all streamed chunks into a single string
-    
+        # Join all streamed chunks into a single string if given as a chunk 
         full_response = ''.join(response.system_prompt)
 
         return full_response
@@ -709,24 +748,28 @@ def handle_llm_review(review_type, user_id, project_id, data):
 
 
 # Route for logic review
-@app.route('/ai/<user_id>/projects/<project_id>/logic-review', methods=['POST'])
-def logic_review(user_id, project_id):
+@app.route('/users/<user_id>/submissions/<submission_id>/logic-review', methods=['POST'])
+def logic_review(user_id, submission_id):
 
-    ref = db.reference(f'users/{user_id}/projects/{project_id}')
-    
-    # Check if project exists
-    project_data = ref.get()
-    if not project_data:
-        return jsonify({'error': 'Project not found'}), 404
-    
-    #get response from llm 
-    llm_review = handle_llm_review("logic", user_id, project_id, request.get_json())
+    ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
 
-    # Append new review 
-    logic_rev = project_data.get('logicrev', [])
+    # Check if submission exists
+    submission_data = ref.get()
+    if not submission_data:
+        return jsonify({'error': 'Submission not found'}), 404
+
+    #get response from llm
+    llm_review = handle_llm_review("logic", user_id, submission_id, request.get_json())
+
+    try:
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+
+    # Append new review
+    logic_rev = submission_data.get('logicrev', [])
     logic_rev.append({
-        "timestamp": get_timestamp(),
-        "review": llm_review
+        "review": llm_review_obj    
     })
     ref.update({
         "logicrev": logic_rev
@@ -736,27 +779,32 @@ def logic_review(user_id, project_id):
         "success": True,
         "review_type": "logic",
         "user_id": user_id,
-        "project_id": project_id,
-        "response": llm_review
+        "submission_id": submission_id,
+        "response": llm_review_obj
     })
 
 # Route for test case review
-@app.route('/ai/<user_id>/projects/<project_id>/testing-review', methods=['POST'])
-def testing_review(user_id, project_id):
-    ref = db.reference(f'users/{user_id}/projects/{project_id}')
+@app.route('/users/<user_id>/submissions/<submission_id>/testing-review', methods=['POST'])
+def testing_review(user_id, submission_id):
     
-    # Check if project exists
-    project_data = ref.get()
-    if not project_data:
-        return jsonify({'error': 'Project not found'}), 404
+    ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
     
-    llm_review = handle_llm_review("testing", user_id, project_id, request.get_json())
-    
+    # Check if submission exists
+    submission_data = ref.get()
+    if not submission_data:
+        return jsonify({'error': 'Submission not found'}), 404
+
+    llm_review = handle_llm_review("testing", user_id, submission_id, request.get_json())
+
+    try:
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+
     # Append new review 
-    test_rev = project_data.get('testingrev', [])
+    test_rev = submission_data.get('testingrev', [])
     test_rev.append({
-        "timestamp": get_timestamp(),
-        "review": llm_review
+        "review": llm_review_obj
     })
     ref.update({
         "testingrev": test_rev
@@ -766,12 +814,12 @@ def testing_review(user_id, project_id):
         "success": True,
         "review_type": "testing",
         "user_id": user_id,
-        "project_id": project_id,
-        "response": llm_review
+        "submission_id": submission_id,
+        "response": llm_review_obj
     })
 
-# Route for security review
-@app.route('/ai/<user_id>/projects/<project_id>/security-review', methods=['POST'])
+# Route for security review 
+@app.route('/users/<user_id>/projects/<project_id>/security-review', methods=['POST'])
 def security_review(user_id, project_id):
 
     ref = db.reference(f'users/{user_id}/projects/{project_id}')
@@ -783,11 +831,15 @@ def security_review(user_id, project_id):
     
     llm_review = handle_llm_review("security", user_id, project_id, request.get_json())
 
+    try:
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+
     # Append new review
     sec_rev = project_data.get('securityrev', [])
     sec_rev.append({
-        "timestamp": get_timestamp(),
-        "review": llm_review
+        "review": llm_review_obj
     })
     ref.update({
         "securityrev": sec_rev
@@ -798,7 +850,7 @@ def security_review(user_id, project_id):
         "review_type": "security",
         "user_id": user_id,
         "project_id": project_id,
-        "response": llm_review
+        "response": llm_review_obj
     })
 
 
