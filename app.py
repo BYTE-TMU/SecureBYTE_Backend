@@ -5,6 +5,9 @@ from flask_cors import CORS
 import os
 import uuid
 from datetime import datetime
+import requests
+import base64
+from urllib.parse import urlencode
 
 # Get the database URL from environment variable
 SERVICE_ACCOUNT_PATH = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
@@ -19,6 +22,11 @@ firebase_admin.initialize_app(cred, {
 
 app = Flask(__name__)
 CORS(app)
+
+# GitHub OAuth configuration
+GITHUB_CLIENT_ID = os.environ.get('GITHUB_CLIENT_ID')
+GITHUB_CLIENT_SECRET = os.environ.get('GITHUB_CLIENT_SECRET')
+GITHUB_REDIRECT_URI = os.environ.get('GITHUB_REDIRECT_URI')
 
 @app.route('/')
 def home():
@@ -149,10 +157,8 @@ def create_submission(user_id, project_id):
         'projectid': project_id,
         'filename': data['filename'],
         'code': data.get('code', ''),
-        'securityrev': data.get('securityrev', []),
         'logicrev': data.get('logicrev', []),
         'testcases': data.get('testcases', []),
-        'reviewpdf': data.get('reviewpdf', ''),
         'created_at': get_timestamp(),
         'updated_at': get_timestamp()
     }
@@ -212,6 +218,11 @@ def update_submission(user_id, submission_id):
     
     # Add updated timestamp
     data['updated_at'] = get_timestamp()
+    
+    # Align with v2 schema: ignore deprecated fields on submissions
+    for _deprecated in ['securityrev', 'reviewpdf']:
+        if _deprecated in data:
+            data.pop(_deprecated, None)
     
     ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
     
@@ -790,6 +801,233 @@ def security_review(user_id, project_id):
         "response": llm_review
     })
 
+
+# ===== GitHub Integration =====
+def extract_github_token():
+    auth_header = request.headers.get('Authorization', '')
+    if isinstance(auth_header, str) and auth_header.startswith('Bearer '):
+        return auth_header[7:]
+    token = request.args.get('access_token')
+    if not token:
+        json_data = request.get_json(silent=True) or {}
+        token = json_data.get('access_token')
+    return token
+
+def github_headers(token):
+    return {
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+    }
+
+@app.route('/auth/github/exchange-token', methods=['POST'])
+def github_exchange_token():
+    data = request.get_json(silent=True) or {}
+    code = data.get('code')
+    redirect_uri = data.get('redirect_uri') or GITHUB_REDIRECT_URI
+    if not code:
+        return jsonify({'error': 'code is required'}), 400
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        return jsonify({'error': 'Server missing GitHub OAuth configuration'}), 500
+    try:
+        resp = requests.post(
+            'https://github.com/login/oauth/access_token',
+            headers={'Accept': 'application/json'},
+            data={
+                'client_id': GITHUB_CLIENT_ID,
+                'client_secret': GITHUB_CLIENT_SECRET,
+                'code': code,
+                'redirect_uri': redirect_uri
+            },
+            timeout=15
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if 'error' in payload:
+            return jsonify({'error': payload.get('error_description') or payload.get('error')}), 400
+        return jsonify({
+            'access_token': payload.get('access_token'),
+            'token_type': payload.get('token_type'),
+            'scope': payload.get('scope')
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/users/<user_id>/github/repos', methods=['GET'])
+def list_github_repos(user_id):
+    token = extract_github_token()
+    if not token:
+        return jsonify({'error': 'Missing GitHub access token'}), 401
+    per_page = request.args.get('per_page', default=100, type=int)
+    page = request.args.get('page', default=1, type=int)
+    try:
+        resp = requests.get(
+            f'https://api.github.com/user/repos',
+            headers=github_headers(token),
+            params={'per_page': per_page, 'page': page, 'sort': 'updated'},
+            timeout=15
+        )
+        if resp.status_code == 401:
+            return jsonify({'error': 'Invalid GitHub token'}), 401
+        resp.raise_for_status()
+        repos = resp.json()
+        simplified = []
+        for r in repos:
+            simplified.append({
+                'id': r.get('id'),
+                'name': r.get('name'),
+                'full_name': r.get('full_name'),
+                'private': r.get('private'),
+                'default_branch': r.get('default_branch'),
+                'permissions': r.get('permissions'),
+                'html_url': r.get('html_url'),
+                'language': r.get('language'),
+                'updated_at': r.get('updated_at'),
+                'owner': {
+                    'login': (r.get('owner') or {}).get('login')
+                }
+            })
+        return jsonify(simplified)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def get_project_ref(user_id, project_id):
+    return db.reference(f'users/{user_id}/projects/{project_id}')
+
+def get_submission_ref(user_id, submission_id):
+    return db.reference(f'users/{user_id}/submissions/{submission_id}')
+
+def is_supported_text_file(path):
+    lower = path.lower()
+    extensions = [
+        '.js','.jsx','.ts','.tsx','.py','.java','.go','.rb','.php','.c','.cpp','.h','.hpp',
+        '.cs','.rs','.kt','.swift','.m','.scala','.sh','.sql','.json','.yml','.yaml','.md','.txt'
+    ]
+    return any(lower.endswith(ext) for ext in extensions)
+
+@app.route('/users/<user_id>/projects/<project_id>/github/link', methods=['POST'])
+def link_github_repo(user_id, project_id):
+    data = request.get_json(silent=True) or {}
+    repo_full_name = data.get('repo_full_name')
+    branch = data.get('branch', 'main')
+    token = extract_github_token()
+
+    project_ref = get_project_ref(user_id, project_id)
+    project = project_ref.get()
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    if not repo_full_name:
+        return jsonify({'error': 'repo_full_name is required'}), 400
+
+    if token:
+        try:
+            check = requests.get(f'https://api.github.com/repos/{repo_full_name}', headers=github_headers(token), timeout=15)
+            if check.status_code == 404:
+                return jsonify({'error': 'Repository not found'}), 404
+            if check.status_code == 401:
+                return jsonify({'error': 'Invalid GitHub token'}), 401
+            check.raise_for_status()
+        except Exception as e:
+            return jsonify({'error': f'Failed to verify repo: {str(e)}'}), 502
+
+    github_link = {
+        'repo_full_name': repo_full_name,
+        'branch': branch,
+        'linked_at': get_timestamp()
+    }
+    project_ref.update({'github': github_link, 'updated_at': get_timestamp()})
+    return jsonify({'message': 'Repository linked', 'github': github_link})
+
+@app.route('/users/<user_id>/projects/<project_id>/github/import', methods=['POST'])
+def import_github_repo(user_id, project_id):
+    token = extract_github_token()
+    if not token:
+        return jsonify({'error': 'Missing GitHub access token'}), 401
+
+    data = request.get_json(silent=True) or {}
+    repo_full_name = data.get('repo_full_name')
+    branch = data.get('branch')
+    max_files = data.get('max_files', 100)
+    max_bytes = data.get('max_bytes', 200000)
+
+    project_ref = get_project_ref(user_id, project_id)
+    project = project_ref.get()
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    if not repo_full_name or not branch:
+        linked = project.get('github') or {}
+        repo_full_name = repo_full_name or linked.get('repo_full_name')
+        branch = branch or linked.get('branch') or 'main'
+
+    if not repo_full_name:
+        return jsonify({'error': 'repo_full_name is required (or link the project first)'}), 400
+
+    try:
+        tree_resp = requests.get(
+            f'https://api.github.com/repos/{repo_full_name}/git/trees/{branch}',
+            headers=github_headers(token),
+            params={'recursive': '1'},
+            timeout=20
+        )
+        if tree_resp.status_code == 404:
+            return jsonify({'error': 'Repository or branch not found'}), 404
+        if tree_resp.status_code == 401:
+            return jsonify({'error': 'Invalid GitHub token'}), 401
+        tree_resp.raise_for_status()
+        tree = tree_resp.json().get('tree', [])
+
+        created = 0
+        fileids = project.get('fileids', [])
+        for node in tree:
+            if node.get('type') != 'blob':
+                continue
+            path = node.get('path') or ''
+            size = node.get('size') or 0
+            if size and size > max_bytes:
+                continue
+            if not is_supported_text_file(path):
+                continue
+
+            blob_sha = node.get('sha')
+            blob_resp = requests.get(
+                f'https://api.github.com/repos/{repo_full_name}/git/blobs/{blob_sha}',
+                headers=github_headers(token),
+                timeout=20
+            )
+            blob_resp.raise_for_status()
+            blob = blob_resp.json()
+            if blob.get('encoding') != 'base64':
+                continue
+            try:
+                content_bytes = base64.b64decode(blob.get('content') or '', validate=True)
+                code_str = content_bytes.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+
+            submission_id = str(uuid.uuid4())
+            submission_data = {
+                'id': submission_id,
+                'projectid': project_id,
+                'filename': path,
+                'code': code_str,
+                'logicrev': [],
+                'testcases': [],
+                'created_at': get_timestamp(),
+                'updated_at': get_timestamp()
+            }
+            get_submission_ref(user_id, submission_id).set(submission_data)
+            fileids.append(submission_id)
+            created += 1
+
+            if created >= max_files:
+                break
+
+        project_ref.update({'fileids': fileids, 'updated_at': get_timestamp()})
+        return jsonify({'message': 'Import complete', 'files_imported': created})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
