@@ -29,6 +29,9 @@
 
 ## Environment Variables
 - `FIREBASE_SERVICE_ACCOUNT`: Path to your Firebase service account JSON file. **Required.**
+- `GITHUB_CLIENT_ID`: GitHub OAuth app client ID. **Required for token exchange endpoint.**
+- `GITHUB_CLIENT_SECRET`: GitHub OAuth app client secret. **Required for token exchange endpoint.**
+- `GITHUB_REDIRECT_URI`: Redirect URI used in OAuth flow. **Optional if the frontend sends it in the request.**
 
 ## Database Schema
 
@@ -43,6 +46,9 @@ users/
         - project_name (string, required)
         - project_desc (string, optional)
         - fileids (array of submission UUIDs)
+        - securityrev (array of strings - optional, AI review history)
+        - logicrev (array of strings - optional, AI review history)
+        - testingrev (array of strings - optional, AI review history)
         - created_at (ISO timestamp)
         - updated_at (ISO timestamp)
     submissions/

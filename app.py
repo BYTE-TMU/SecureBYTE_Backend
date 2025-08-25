@@ -7,16 +7,21 @@ import sys
 import uuid
 import json
 from datetime import datetime
+import requests
+import base64
+from urllib.parse import urlencode
+import tarfile
+import io
 
-# Add the SecureBYTE_AI directory to the Python path
-securebyte_ai_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'SecureBYTE_AI'))
-if securebyte_ai_path not in sys.path:
-    sys.path.insert(0, securebyte_ai_path)
+# Ensure project root is on sys.path so `SecureBYTE_AI` package is importable
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 try:
     from SecureBYTE_AI.main import LLMManager
     LLM_AVAILABLE = True
-except ImportError as e:
+except Exception as e:
     print(f"Warning: Could not import LLMManager: {e}")
     LLMManager = None
     LLM_AVAILABLE = False
@@ -35,6 +40,12 @@ firebase_admin.initialize_app(cred, {
 app = Flask(__name__)
 CORS(app)
 
+
+# GitHub OAuth configuration
+GITHUB_CLIENT_ID = os.environ.get('GITHUB_CLIENT_ID')
+GITHUB_CLIENT_SECRET = os.environ.get('GITHUB_CLIENT_SECRET')
+GITHUB_REDIRECT_URI = os.environ.get('GITHUB_REDIRECT_URI')
+
 # Initialize LLM Manager if available
 llm = None
 if LLM_AVAILABLE and LLMManager:
@@ -49,6 +60,7 @@ if LLM_AVAILABLE and LLMManager:
 def load_prompt(filename):
     with open(filename, 'r', encoding='utf-8') as f:
         return f.read()
+
 
 
 @app.route('/')
@@ -180,10 +192,8 @@ def create_submission(user_id, project_id):
         'projectid': project_id,
         'filename': data['filename'],
         'code': data.get('code', ''),
-        'securityrev': data.get('securityrev', []),
         'logicrev': data.get('logicrev', []),
         'testcases': data.get('testcases', []),
-        'reviewpdf': data.get('reviewpdf', ''),
         'created_at': get_timestamp(),
         'updated_at': get_timestamp()
     }
@@ -243,6 +253,11 @@ def update_submission(user_id, submission_id):
     
     # Add updated timestamp
     data['updated_at'] = get_timestamp()
+    
+    # Align with v2 schema: ignore deprecated fields on submissions
+    for _deprecated in ['securityrev', 'reviewpdf']:
+        if _deprecated in data:
+            data.pop(_deprecated, None)
     
     ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
     
@@ -701,10 +716,13 @@ def get_dashboard_summary(user_id):
 
 def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     """Handle LLM review requests"""
-    code = data.get('code')       
+    code = data.get('code')
 
     if not code:
         return jsonify({"success": False, "error": "Missing 'code'"}), 400
+
+    if llm is None:
+        return jsonify({"success": False, "error": "LLM not available on server"}), 503
 
     PROMPT_PATHS = {
         "logic": "prompts/logic_prompt.txt",
@@ -725,8 +743,11 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         # Generate response from LLM
         response = llm.generate_response(user_prompt=prompt)
 
-        # Join all streamed chunks into a single string if given as a chunk 
-        full_response = ''.join(response.system_prompt)
+        # Handle both string and generator responses
+        if hasattr(response, 'system_prompt'):
+            full_response = ''.join(response.system_prompt)
+        else:
+            full_response = str(response)
 
         return full_response
     
@@ -840,6 +861,356 @@ def security_review(user_id, project_id):
         "response": llm_review_obj
     })
 
+
+# ===== GitHub Integration =====
+def extract_github_token():
+    auth_header = request.headers.get('Authorization', '')
+    if isinstance(auth_header, str) and auth_header.startswith('Bearer '):
+        return auth_header[7:]
+    token = request.args.get('access_token')
+    if not token:
+        json_data = request.get_json(silent=True) or {}
+        token = json_data.get('access_token')
+    return token
+
+def github_headers(token):
+    return {
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+    }
+
+@app.route('/auth/github/exchange-token', methods=['POST'])
+def github_exchange_token():
+    data = request.get_json(silent=True) or {}
+    code = data.get('code')
+    redirect_uri = data.get('redirect_uri') or GITHUB_REDIRECT_URI
+    if not code:
+        return jsonify({'error': 'code is required'}), 400
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        return jsonify({'error': 'Server missing GitHub OAuth configuration'}), 500
+    try:
+        resp = requests.post(
+            'https://github.com/login/oauth/access_token',
+            headers={'Accept': 'application/json'},
+            data={
+                'client_id': GITHUB_CLIENT_ID,
+                'client_secret': GITHUB_CLIENT_SECRET,
+                'code': code,
+                'redirect_uri': redirect_uri
+            },
+            timeout=15
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if 'error' in payload:
+            return jsonify({'error': payload.get('error_description') or payload.get('error')}), 400
+        return jsonify({
+            'access_token': payload.get('access_token'),
+            'token_type': payload.get('token_type'),
+            'scope': payload.get('scope')
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/users/<user_id>/github/repos', methods=['GET'])
+def list_github_repos(user_id):
+    token = extract_github_token()
+    if not token:
+        return jsonify({'error': 'Missing GitHub access token'}), 401
+    per_page = request.args.get('per_page', default=100, type=int)
+    page = request.args.get('page', default=1, type=int)
+    try:
+        resp = requests.get(
+            f'https://api.github.com/user/repos',
+            headers=github_headers(token),
+            params={'per_page': per_page, 'page': page, 'sort': 'updated'},
+            timeout=15
+        )
+        if resp.status_code == 401:
+            return jsonify({'error': 'Invalid GitHub token'}), 401
+        resp.raise_for_status()
+        repos = resp.json()
+        simplified = []
+        for r in repos:
+            simplified.append({
+                'id': r.get('id'),
+                'name': r.get('name'),
+                'full_name': r.get('full_name'),
+                'private': r.get('private'),
+                'default_branch': r.get('default_branch'),
+                'permissions': r.get('permissions'),
+                'html_url': r.get('html_url'),
+                'language': r.get('language'),
+                'updated_at': r.get('updated_at'),
+                'owner': {
+                    'login': (r.get('owner') or {}).get('login')
+                }
+            })
+        return jsonify(simplified)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def get_project_ref(user_id, project_id):
+    return db.reference(f'users/{user_id}/projects/{project_id}')
+
+def get_submission_ref(user_id, submission_id):
+    return db.reference(f'users/{user_id}/submissions/{submission_id}')
+
+def is_supported_text_file(path):
+    lower = path.lower()
+    extensions = [
+        '.js', '.jsx', '.ts', '.tsx', '.py', '.ipynb', '.java', '.go', '.rb', '.php', '.c', '.cpp', '.h', '.hpp',
+        '.cs', '.rs', '.kt', '.swift', '.m', '.scala', '.sh', '.bat', '.ps1', '.sql', '.json', '.yml', '.yaml',
+        '.toml', '.ini', '.cfg', '.conf', '.properties', '.xml', '.html', '.css', '.scss', '.less', '.vue',
+        '.svelte', '.gradle', '.md', '.txt', '.env', '.gitignore', '.gitattributes', '.editorconfig'
+    ]
+    if any(lower.endswith(ext) for ext in extensions):
+        return True
+    # Common filenames without extensions
+    basename = lower.split('/')[-1]
+    if basename in ['makefile', 'dockerfile', 'license', 'readme']:
+        return True
+    return False
+
+@app.route('/users/<user_id>/projects/<project_id>/github/link', methods=['POST'])
+def link_github_repo(user_id, project_id):
+    data = request.get_json(silent=True) or {}
+    repo_full_name = data.get('repo_full_name')
+    branch = data.get('branch')
+    token = extract_github_token()
+
+    project_ref = get_project_ref(user_id, project_id)
+    project = project_ref.get()
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    if not repo_full_name:
+        return jsonify({'error': 'repo_full_name is required'}), 400
+
+    default_branch = None
+    if token:
+        try:
+            check = requests.get(
+                f'https://api.github.com/repos/{repo_full_name}',
+                headers=github_headers(token),
+                timeout=15
+            )
+            if check.status_code == 404:
+                return jsonify({'error': 'Repository not found'}), 404
+            if check.status_code == 401:
+                return jsonify({'error': 'Invalid GitHub token'}), 401
+            check.raise_for_status()
+            default_branch = (check.json() or {}).get('default_branch')
+        except Exception as e:
+            return jsonify({'error': f'Failed to verify repo: {str(e)}'}), 502
+
+    if not branch:
+        branch = default_branch or 'main'
+
+    github_link = {
+        'repo_full_name': repo_full_name,
+        'branch': branch,
+        'linked_at': get_timestamp()
+    }
+    project_ref.update({'github': github_link, 'updated_at': get_timestamp()})
+    return jsonify({'message': 'Repository linked', 'github': github_link})
+
+@app.route('/users/<user_id>/projects/<project_id>/github/import', methods=['POST'])
+def import_github_repo(user_id, project_id):
+    print(f"[IMPORT] Starting import for user={user_id}, project={project_id}")
+    token = extract_github_token()
+    if not token:
+        print("[IMPORT] No GitHub token found")
+        return jsonify({'error': 'Missing GitHub access token'}), 401
+    
+    print(f"[IMPORT] Using GitHub token: {token[:10]}..." if token else "[IMPORT] No token")
+
+    data = request.get_json(silent=True) or {}
+    repo_full_name = data.get('repo_full_name')
+    branch = data.get('branch')
+    max_files = data.get('max_files')  # No hard cap unless provided
+    # No size restriction by default; only apply if provided
+    max_bytes = data.get('max_bytes')
+
+    project_ref = get_project_ref(user_id, project_id)
+    project = project_ref.get()
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    if not repo_full_name:
+        linked = project.get('github') or {}
+        repo_full_name = linked.get('repo_full_name')
+    if not repo_full_name:
+        return jsonify({'error': 'repo_full_name is required (or link the project first)'}), 400
+
+    if not branch:
+        # Prefer linked branch if available, else repo default
+        linked = project.get('github') or {}
+        branch = linked.get('branch')
+        if not branch:
+            repo_resp = requests.get(
+                f'https://api.github.com/repos/{repo_full_name}',
+                headers=github_headers(token),
+                timeout=15
+            )
+            if repo_resp.status_code == 200:
+                branch = (repo_resp.json() or {}).get('default_branch') or 'main'
+            else:
+                branch = 'main'
+
+    if not repo_full_name:
+        return jsonify({'error': 'repo_full_name is required (or link the project first)'}), 400
+
+    try:
+        tree_url = f'https://api.github.com/repos/{repo_full_name}/git/trees/{branch}'
+        print(f"[IMPORT] Fetching tree from: {tree_url}")
+        tree_resp = requests.get(
+            tree_url,
+            headers=github_headers(token),
+            params={'recursive': '1'},
+            timeout=20
+        )
+        print(f"[IMPORT] Tree API response status: {tree_resp.status_code}")
+        if tree_resp.status_code == 404:
+            # Fallback to the repo default branch if provided branch not found
+            repo_resp = requests.get(
+                f'https://api.github.com/repos/{repo_full_name}',
+                headers=github_headers(token),
+                timeout=15
+            )
+            if repo_resp.status_code == 200:
+                default_branch = (repo_resp.json() or {}).get('default_branch') or 'main'
+                tree_resp = requests.get(
+                    f'https://api.github.com/repos/{repo_full_name}/git/trees/{default_branch}',
+                    headers=github_headers(token),
+                    params={'recursive': '1'},
+                    timeout=20
+                )
+                branch = default_branch
+            else:
+                return jsonify({'error': 'Repository or branch not found'}), 404
+        if tree_resp.status_code == 401:
+            return jsonify({'error': 'Invalid GitHub token'}), 401
+        tree_resp.raise_for_status()
+        tree_payload = tree_resp.json()
+        tree = tree_payload.get('tree', [])
+        truncated = bool(tree_payload.get('truncated'))
+        print(f"[IMPORT] Got {len(tree)} items from tree API, truncated={truncated}")
+
+        created = 0
+        fileids = project.get('fileids', [])
+        for node in tree:
+            if node.get('type') != 'blob':
+                print(f"[IMPORT] Skipping non-blob: {node.get('path')} (type: {node.get('type')})")
+                continue
+            path = node.get('path') or ''
+            size = node.get('size') or 0
+            print(f"[IMPORT] Processing file: {path} (size={size})")
+            if max_bytes and size and size > max_bytes:
+                print(f"[IMPORT] Skipping {path} - too large ({size} bytes)")
+                continue
+            # Import all files regardless of extension
+
+            blob_sha = node.get('sha')
+            print(f"[IMPORT] Fetching blob for {path} (sha: {blob_sha})")
+            blob_resp = requests.get(
+                f'https://api.github.com/repos/{repo_full_name}/git/blobs/{blob_sha}',
+                headers=github_headers(token),
+                timeout=20
+            )
+            # GitHub might return truncated content via the content API; ensure full blob fetch
+            if blob_resp.status_code != 200:
+                print(f"[IMPORT] Failed to get blob for {path}, status: {blob_resp.status_code}")
+                continue
+            blob = blob_resp.json()
+            if blob.get('encoding') == 'base64':
+                try:
+                    # GitHub returns base64 content with newlines that need to be removed
+                    content_b64 = (blob.get('content') or '').replace('\n', '').replace('\r', '')
+                    content_bytes = base64.b64decode(content_b64, validate=True)
+                    code_str = content_bytes.decode('utf-8', errors='replace')
+                    print(f"[IMPORT] Decoded base64 content for {path} ({len(code_str)} chars)")
+                except Exception as e:
+                    print(f"[IMPORT] Failed to decode base64 for {path}: {str(e)}")
+                    continue
+            else:
+                # Some endpoints may return raw content; try to treat it as text
+                code_str = str(blob.get('content', ''))
+                print(f"[IMPORT] Got raw content for {path} ({len(code_str)} chars)")
+
+            submission_id = str(uuid.uuid4())
+            submission_data = {
+                'id': submission_id,
+                'projectid': project_id,
+                'filename': path,
+                'code': code_str,
+                'logicrev': [],
+                'testcases': [],
+                'created_at': get_timestamp(),
+                'updated_at': get_timestamp()
+            }
+            get_submission_ref(user_id, submission_id).set(submission_data)
+            fileids.append(submission_id)
+            created += 1
+            print(f"[IMPORT] Created submission {submission_id} for {path}")
+
+            if max_files and created >= max_files:
+                print(f"[IMPORT] Hit max_files limit ({max_files}), stopping")
+                break
+        # If Git tree was truncated, fall back to tarball to capture remaining files
+        if truncated:
+            try:
+                tar_url = f'https://api.github.com/repos/{repo_full_name}/tarball/{branch}'
+                tar_resp = requests.get(tar_url, headers=github_headers(token), stream=True, timeout=60)
+                if tar_resp.status_code == 200:
+                    tar_resp.raw.decode_content = True
+                    with tarfile.open(fileobj=tar_resp.raw, mode='r|*') as tar:
+                        for member in tar:
+                            if not member.isreg():
+                                continue
+                            # member.name includes a top-level folder; strip it
+                            parts = member.name.split('/', 1)
+                            path = parts[1] if len(parts) > 1 else parts[0]
+                            # Skip if already imported from the tree API loop
+                            if any(sid for sid in fileids if path == db.reference(f'users/{user_id}/submissions/{sid}').get().get('filename')):
+                                continue
+                            fileobj = tar.extractfile(member)
+                            if not fileobj:
+                                continue
+                            try:
+                                content_bytes = fileobj.read()
+                                code_str = content_bytes.decode('utf-8', errors='replace')
+                            except Exception:
+                                continue
+                            submission_id = str(uuid.uuid4())
+                            submission_data = {
+                                'id': submission_id,
+                                'projectid': project_id,
+                                'filename': path,
+                                'code': code_str,
+                                'logicrev': [],
+                                'testcases': [],
+                                'created_at': get_timestamp(),
+                                'updated_at': get_timestamp()
+                            }
+                            get_submission_ref(user_id, submission_id).set(submission_data)
+                            fileids.append(submission_id)
+                            created += 1
+                            if max_files and created >= max_files:
+                                break
+                else:
+                    # If tar fallback fails, proceed with what we have
+                    pass
+            except Exception:
+                # Ignore tar fallback errors; return what we imported
+                pass
+
+        project_ref.update({'fileids': fileids, 'updated_at': get_timestamp()})
+        print(f"[IMPORT] Import complete: {created} files imported, updating project fileids")
+        return jsonify({'message': 'Import complete', 'files_imported': created, 'truncated_fallback_used': truncated})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
