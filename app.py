@@ -21,6 +21,7 @@ if project_root not in sys.path:
 try:
     from SecureBYTE_AI.main import LLMManager
     LLM_AVAILABLE = True
+    print("LLM Manager imported successfully")
 except Exception as e:
     print(f"Warning: Could not import LLMManager: {e}")
     LLMManager = None
@@ -716,13 +717,6 @@ def get_dashboard_summary(user_id):
 
 def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     """Handle LLM review requests"""
-    code = data.get('code')
-
-    if not code:
-        return jsonify({"success": False, "error": "Missing 'code'"}), 400
-
-    if llm is None:
-        return jsonify({"success": False, "error": "LLM not available on server"}), 503
 
     PROMPT_PATHS = {
         "logic": "prompts/logic_prompt.txt",
@@ -731,17 +725,35 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     }
 
     if review_type not in PROMPT_PATHS:
-        return jsonify({"success": False, "error": "Invalid review type"}), 400
-    
+        return {"success": False, "error": "Invalid review type"}
+
+    if review_type == "security":
+        # For security reviews, data is an array of files
+        files_data = data
+        if not files_data or len(files_data) == 0:
+            return {"success": False, "error": "Missing files data"}
+        # Convert the files array to JSON string for the prompt
+        code = json.dumps(files_data, indent=2)
+        
+    else:
+        # For logic and testing reviews, data has a 'code' field
+        code = data.get('code')
+        if not code:
+            return {"success": False, "error": "Missing 'code'"}
+
+    if llm is None:
+        return {"success": False, "error": "LLM not available on server"}
+
     try:   
         # Load the correct prompt template for the review type
         prompt_template = load_prompt(PROMPT_PATHS[review_type])
 
         # Inject the code into the template
-        prompt = prompt_template.format(code=code)
+        prompt = prompt_template.replace('{code}', code)
 
         # Generate response from LLM
         response = llm.generate_response(user_prompt=prompt)
+        print(f"response: {response}")
 
         # Handle both string and generator responses
         if hasattr(response, 'system_prompt'):
@@ -831,13 +843,29 @@ def testing_review(user_id, submission_id):
 def security_review(user_id, project_id):
 
     ref = db.reference(f'users/{user_id}/projects/{project_id}')
-    
+
+    # Function to update the database with the newest submission needs implementation
+
     # Check if project exists
     project_data = ref.get()
     if not project_data:
         return jsonify({'error': 'Project not found'}), 404
     
-    llm_review = handle_llm_review("security", user_id, project_id, request.get_json())
+    #extract a list of fileids to be sent to LLM 
+    file_ids = project_data.get('fileids', [])
+
+    # Extract code, filename for each file ID
+    data = []
+    for file_id in file_ids:
+        submission_ref = db.reference(f'users/{user_id}/submissions/{file_id}')
+        submission_data = submission_ref.get()
+        if submission_data:
+            data.append({
+            'filename': submission_data.get('filename', ''),
+            'code': submission_data.get('code', '')
+        })
+    print(f"Data is {data}")
+    llm_review = handle_llm_review("security", user_id, project_id, data)
 
     try:
         llm_review_obj = json.loads(llm_review)
