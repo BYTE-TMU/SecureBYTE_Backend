@@ -1,5 +1,6 @@
 Flask>=2.0.0
 firebase-admin>=6.0.0 
 Flask-CORS>=3.0.0
+Flask-Limiter>=3.5.0
 requests>=2.31.0 
 python-dotenv>=1.0.0

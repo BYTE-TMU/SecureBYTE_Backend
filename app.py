@@ -12,6 +12,9 @@ import base64
 from urllib.parse import urlencode
 import tarfile
 import io
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from code_cleaner import compress_code
 
 # Ensure project root is on sys.path so `SecureBYTE_AI` package is importable
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -41,6 +44,13 @@ firebase_admin.initialize_app(cred, {
 app = Flask(__name__)
 CORS(app)
 
+# Initialize Flask-Limiter
+limiter = Limiter(
+    key_func=get_remote_address,  # Rate limit by IP address
+    default_limits=["200 per day", "50 per hour"]  # Global limits
+)
+
+limiter.init_app(app)
 
 # GitHub OAuth configuration
 GITHUB_CLIENT_ID = os.environ.get('GITHUB_CLIENT_ID')
@@ -713,7 +723,35 @@ def get_dashboard_summary(user_id):
     
     return jsonify(summary)
 
-# Common Route handler for LLM reviews 
+# Common Route handler for LLM reviews  , as well as code cleaning to be put to LLM
+
+# def clean_code_for_llm(content, filename):
+#     """Clean code content using CodeCleaner methods"""
+#     try:
+#         print(f"[DEBUG] Input content length: {len(content)}, filename: {filename}")
+        
+#         # Get file extension from filename
+#         file_ext = os.path.splitext(filename)[1].lower()
+#         print(f"[DEBUG] File extension: {file_ext}")
+        
+#         # Step 1: Remove comments (let CodeCleaner handle file type logic)
+#         content = code_cleaner.remove_comments(content, file_ext)
+#         print(f"[DEBUG] After removing comments: {len(content)} chars")
+        
+#         # Step 2: Remove imports (let CodeCleaner handle file type logic)
+#         content = code_cleaner.remove_imports(content, file_ext)
+#         print(f"[DEBUG] After removing imports: {len(content)} chars")
+        
+#         # Step 3: Clean whitespace 
+#         content = code_cleaner.clean_whitespace(content)
+#         print(f"[DEBUG] After cleaning whitespace: {len(content)} chars")
+        
+#         print(f"[DEBUG] Final cleaned content length: {len(content)}")
+#         return content
+        
+#     except Exception as e:
+#         print(f"Error cleaning code: {e}")
+#         return content  
 
 def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     """Handle LLM review requests"""
@@ -732,12 +770,28 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         files_data = data
         if not files_data or len(files_data) == 0:
             return {"success": False, "error": "Missing files data"}
+        
+        for file_data in files_data:
+            original_code = file_data.get('code', '')
+
+            # Clean the code before sending to LLM
+            cleaned_code = compress_code(original_code)
+            print("og_code\n", original_code)
+            print("cleaned_code:\n", cleaned_code)
+            print("DONE")
+            file_data['code'] = cleaned_code
+
         # Convert the files array to JSON string for the prompt
         code = json.dumps(files_data, indent=2)
         
     else:
         # For logic and testing reviews, data has a 'code' field
-        code = data.get('code')
+        original_code = data.get('code', '')
+
+        
+        # Clean the code before sending to LLM
+        code = compress_code(original_code)
+
         if not code:
             return {"success": False, "error": "Missing 'code'"}
 
@@ -762,6 +816,7 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
             full_response = str(response)
 
         return full_response
+        
     
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -769,6 +824,7 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
 
 # Route for logic review
 @app.route('/users/<user_id>/submissions/<submission_id>/logic-review', methods=['POST'])
+@limiter.limit("1 per 5 seconds") 
 def logic_review(user_id, submission_id):
 
     ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
@@ -805,6 +861,7 @@ def logic_review(user_id, submission_id):
 
 # Route for test case review
 @app.route('/users/<user_id>/submissions/<submission_id>/testing-review', methods=['POST'])
+@limiter.limit("1 per 5 seconds") 
 def testing_review(user_id, submission_id):
     
     ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
@@ -840,12 +897,13 @@ def testing_review(user_id, submission_id):
 
 # Route for security review 
 @app.route('/users/<user_id>/projects/<project_id>/security-review', methods=['POST'])
+@limiter.limit("1 per 5 seconds") 
 def security_review(user_id, project_id):
 
     ref = db.reference(f'users/{user_id}/projects/{project_id}')
 
     # Function to update the database with the newest submission needs implementation
-
+    
     # Check if project exists
     project_data = ref.get()
     if not project_data:
@@ -864,7 +922,7 @@ def security_review(user_id, project_id):
             'filename': submission_data.get('filename', ''),
             'code': submission_data.get('code', '')
         })
-    print(f"Data is {data}")
+
     llm_review = handle_llm_review("security", user_id, project_id, data)
 
     try:
