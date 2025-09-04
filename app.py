@@ -257,6 +257,18 @@ def get_submission(user_id, submission_id):
     
     return jsonify(submission)
 
+# Get only the code of a specific submission
+@app.route('/users/<user_id>/submissions/<submission_id>/code', methods=['GET'])
+def get_submission_code(user_id, submission_id):
+    """Get only the code of a specific submission"""
+    ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
+    submission = ref.get()
+    
+    if not submission:
+        return jsonify({'error': 'Submission not found'}), 404
+    print( "SUBMISSION CODE" , submission.get('code', ''))
+    return jsonify({'code': submission.get('code', '')})
+
 @app.route('/users/<user_id>/submissions/<submission_id>', methods=['PUT'])
 def update_submission(user_id, submission_id):
     """Update a submission"""
@@ -723,35 +735,7 @@ def get_dashboard_summary(user_id):
     
     return jsonify(summary)
 
-# Common Route handler for LLM reviews  , as well as code cleaning to be put to LLM
-
-# def clean_code_for_llm(content, filename):
-#     """Clean code content using CodeCleaner methods"""
-#     try:
-#         print(f"[DEBUG] Input content length: {len(content)}, filename: {filename}")
-        
-#         # Get file extension from filename
-#         file_ext = os.path.splitext(filename)[1].lower()
-#         print(f"[DEBUG] File extension: {file_ext}")
-        
-#         # Step 1: Remove comments (let CodeCleaner handle file type logic)
-#         content = code_cleaner.remove_comments(content, file_ext)
-#         print(f"[DEBUG] After removing comments: {len(content)} chars")
-        
-#         # Step 2: Remove imports (let CodeCleaner handle file type logic)
-#         content = code_cleaner.remove_imports(content, file_ext)
-#         print(f"[DEBUG] After removing imports: {len(content)} chars")
-        
-#         # Step 3: Clean whitespace 
-#         content = code_cleaner.clean_whitespace(content)
-#         print(f"[DEBUG] After cleaning whitespace: {len(content)} chars")
-        
-#         print(f"[DEBUG] Final cleaned content length: {len(content)}")
-#         return content
-        
-#     except Exception as e:
-#         print(f"Error cleaning code: {e}")
-#         return content  
+# Common Route handler for LLM reviews 
 
 def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     """Handle LLM review requests"""
@@ -776,9 +760,7 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
 
             # Clean the code before sending to LLM
             cleaned_code = compress_code(original_code)
-            print("og_code\n", original_code)
-            print("cleaned_code:\n", cleaned_code)
-            print("DONE")
+           
             file_data['code'] = cleaned_code
 
         # Convert the files array to JSON string for the prompt
@@ -788,7 +770,6 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         # For logic and testing reviews, data has a 'code' field
         original_code = data.get('code', '')
 
-        
         # Clean the code before sending to LLM
         code = compress_code(original_code)
 
@@ -827,6 +808,10 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
 @limiter.limit("1 per 5 seconds") 
 def logic_review(user_id, submission_id):
 
+    # Update the submission to be the latest version
+
+    update_submission(user_id, submission_id)
+
     ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
 
     # Check if submission exists
@@ -863,6 +848,9 @@ def logic_review(user_id, submission_id):
 @app.route('/users/<user_id>/submissions/<submission_id>/testing-review', methods=['POST'])
 @limiter.limit("1 per 5 seconds") 
 def testing_review(user_id, submission_id):
+    
+    # Update the submission to be the latest version
+    update_submission(user_id, submission_id)
     
     ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
     

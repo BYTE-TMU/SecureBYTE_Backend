@@ -12,7 +12,6 @@ Return a structured JSON report following the schema below. If a file cannot be 
   "review_time": "<ISO-8601 timestamp of analysis>",
   "files": [
     {
-      "filename": "<file name>",
       "code_content": "<full source code of the file for reference>",
       "test_cases": [
         {
@@ -27,6 +26,22 @@ Return a structured JSON report following the schema below. If a file cannot be 
     }
   ]
 }
+
+CRITICAL JSON FORMATTING REQUIREMENTS:
+- Return ONLY valid JSON - no code expressions, no programming syntax
+- Do NOT use Python syntax like "A" * 1000 or "text" * 50
+- Do NOT use JavaScript syntax like "a".repeat(10000) or Array(100).fill("x")
+- Do NOT use any programming language methods, functions, or operators
+- Use actual literal string values only
+- For long strings, use a reasonable sample (e.g., "aaaaaaaaaa" for 10 A's, not thousands)
+- All values must be valid JSON primitives: strings, numbers, booleans, null, arrays, objects
+- Ensure the JSON is complete with proper opening { and closing } braces
+- Test case inputs and outputs should be actual data, not code that generates data
+
+EXAMPLE OF CORRECT FORMAT:
+"input": "Hello World"  ✓ CORRECT
+"input": "A" * 100      ✗ WRONG - this is Python code
+"input": "a".repeat(50) ✗ WRONG - this is JavaScript code
 
 The source code for this file is provided below:
 {code}
