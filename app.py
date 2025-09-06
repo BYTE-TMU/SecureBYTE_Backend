@@ -825,7 +825,7 @@ def logic_review(user_id, submission_id):
     try:
         llm_review_obj = json.loads(llm_review)
     except json.JSONDecodeError:
-        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+        return jsonify({'error': 'Prompt returned NOT a valid JSON'}), 500
 
     # Append new review
     logic_rev = submission_data.get('logicrev', [])
@@ -844,7 +844,7 @@ def logic_review(user_id, submission_id):
         "response": llm_review_obj
     })
 
-# Route for test case review
+# Route for testing review
 @app.route('/users/<user_id>/submissions/<submission_id>/testing-review', methods=['POST'])
 @limiter.limit("1 per 5 seconds") 
 def testing_review(user_id, submission_id):
@@ -864,7 +864,7 @@ def testing_review(user_id, submission_id):
     try:
         llm_review_obj = json.loads(llm_review)
     except json.JSONDecodeError:
-        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+        return jsonify({'error': 'Prompt returned NOT a valid JSON'}), 500
 
     # Append new review 
     test_rev = submission_data.get('testingrev', [])
@@ -910,7 +910,7 @@ def security_review(user_id, project_id):
             'filename': submission_data.get('filename', ''),
             'code': submission_data.get('code', '')
         })
-
+    
     llm_review = handle_llm_review("security", user_id, project_id, data)
 
     try:
