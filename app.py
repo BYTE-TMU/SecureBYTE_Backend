@@ -15,6 +15,7 @@ import io
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from code_cleaner import compress_code
+from dotenv import load_dotenv
 
 # Ensure project root is on sys.path so `SecureBYTE_AI` package is importable
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -42,7 +43,12 @@ firebase_admin.initialize_app(cred, {
 })
 
 app = Flask(__name__)
-CORS(app)
+# Explicit CORS configuration to allow local frontend dev servers
+CORS(
+    app,
+    resources={r"/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}},
+    supports_credentials=True
+)
 
 # Initialize Flask-Limiter
 limiter = Limiter(
@@ -51,6 +57,18 @@ limiter = Limiter(
 )
 
 limiter.init_app(app)
+
+# Safely confirm presence of OpenAI API key without printing it
+# Load .env from the backend directory explicitly to ensure availability
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+try:
+    from SecureBYTE_AI.config import validate_api_key as _validate_openai_key
+    if _validate_openai_key("openai"):
+        print("OpenAI API key detected")
+    else:
+        print("OpenAI API key not detected")
+except Exception as e:
+    print(f"Warning: OpenAI API key check failed: {e}")
 
 # GitHub OAuth configuration
 GITHUB_CLIENT_ID = os.environ.get('GITHUB_CLIENT_ID')
@@ -256,6 +274,18 @@ def get_submission(user_id, submission_id):
         return jsonify({'error': 'Submission not found'}), 404
     
     return jsonify(submission)
+
+# Get only the code of a specific submission
+@app.route('/users/<user_id>/submissions/<submission_id>/code', methods=['GET'])
+def get_submission_code(user_id, submission_id):
+    """Get only the code of a specific submission"""
+    ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
+    submission = ref.get()
+    
+    if not submission:
+        return jsonify({'error': 'Submission not found'}), 404
+    print( "SUBMISSION CODE" , submission.get('code', ''))
+    return jsonify({'code': submission.get('code', '')})
 
 @app.route('/users/<user_id>/submissions/<submission_id>', methods=['PUT'])
 def update_submission(user_id, submission_id):
@@ -723,35 +753,7 @@ def get_dashboard_summary(user_id):
     
     return jsonify(summary)
 
-# Common Route handler for LLM reviews  , as well as code cleaning to be put to LLM
-
-# def clean_code_for_llm(content, filename):
-#     """Clean code content using CodeCleaner methods"""
-#     try:
-#         print(f"[DEBUG] Input content length: {len(content)}, filename: {filename}")
-        
-#         # Get file extension from filename
-#         file_ext = os.path.splitext(filename)[1].lower()
-#         print(f"[DEBUG] File extension: {file_ext}")
-        
-#         # Step 1: Remove comments (let CodeCleaner handle file type logic)
-#         content = code_cleaner.remove_comments(content, file_ext)
-#         print(f"[DEBUG] After removing comments: {len(content)} chars")
-        
-#         # Step 2: Remove imports (let CodeCleaner handle file type logic)
-#         content = code_cleaner.remove_imports(content, file_ext)
-#         print(f"[DEBUG] After removing imports: {len(content)} chars")
-        
-#         # Step 3: Clean whitespace 
-#         content = code_cleaner.clean_whitespace(content)
-#         print(f"[DEBUG] After cleaning whitespace: {len(content)} chars")
-        
-#         print(f"[DEBUG] Final cleaned content length: {len(content)}")
-#         return content
-        
-#     except Exception as e:
-#         print(f"Error cleaning code: {e}")
-#         return content  
+# Common Route handler for LLM reviews 
 
 def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     """Handle LLM review requests"""
@@ -776,9 +778,7 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
 
             # Clean the code before sending to LLM
             cleaned_code = compress_code(original_code)
-            print("og_code\n", original_code)
-            print("cleaned_code:\n", cleaned_code)
-            print("DONE")
+           
             file_data['code'] = cleaned_code
 
         # Convert the files array to JSON string for the prompt
@@ -788,7 +788,6 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         # For logic and testing reviews, data has a 'code' field
         original_code = data.get('code', '')
 
-        
         # Clean the code before sending to LLM
         code = compress_code(original_code)
 
@@ -819,13 +818,18 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         
     
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        # Always return a plain dict on error so callers can detect and handle
+        return {"success": False, "error": str(e)}
 
 
 # Route for logic review
 @app.route('/users/<user_id>/submissions/<submission_id>/logic-review', methods=['POST'])
 @limiter.limit("1 per 5 seconds") 
 def logic_review(user_id, submission_id):
+
+    # Update the submission to be the latest version
+
+    update_submission(user_id, submission_id)
 
     ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
 
@@ -837,10 +841,15 @@ def logic_review(user_id, submission_id):
     #get response from llm
     llm_review = handle_llm_review("logic", user_id, submission_id, request.get_json())
 
+    # Normalize LLM output and handle errors consistently
+    if isinstance(llm_review, dict):
+        return jsonify(llm_review), 400
+    if isinstance(llm_review, (bytes, bytearray)):
+        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(llm_review)
-    except json.JSONDecodeError:
-        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+        llm_review_obj = json.loads(str(llm_review))
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
     # Append new review
     logic_rev = submission_data.get('logicrev', [])
@@ -859,10 +868,13 @@ def logic_review(user_id, submission_id):
         "response": llm_review_obj
     })
 
-# Route for test case review
+# Route for testing review
 @app.route('/users/<user_id>/submissions/<submission_id>/testing-review', methods=['POST'])
 @limiter.limit("1 per 5 seconds") 
 def testing_review(user_id, submission_id):
+    
+    # Update the submission to be the latest version
+    update_submission(user_id, submission_id)
     
     ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
     
@@ -873,10 +885,14 @@ def testing_review(user_id, submission_id):
 
     llm_review = handle_llm_review("testing", user_id, submission_id, request.get_json())
 
+    if isinstance(llm_review, dict):
+        return jsonify(llm_review), 400
+    if isinstance(llm_review, (bytes, bytearray)):
+        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(llm_review)
-    except json.JSONDecodeError:
-        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+        llm_review_obj = json.loads(str(llm_review))
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
     # Append new review 
     test_rev = submission_data.get('testingrev', [])
@@ -922,13 +938,17 @@ def security_review(user_id, project_id):
             'filename': submission_data.get('filename', ''),
             'code': submission_data.get('code', '')
         })
-
+    
     llm_review = handle_llm_review("security", user_id, project_id, data)
 
+    if isinstance(llm_review, dict):
+        return jsonify(llm_review), 400
+    if isinstance(llm_review, (bytes, bytearray)):
+        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(llm_review)
-    except json.JSONDecodeError:
-        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+        llm_review_obj = json.loads(str(llm_review))
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
     # Append new review
     sec_rev = project_data.get('securityrev', [])
