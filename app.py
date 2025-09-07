@@ -15,6 +15,7 @@ import io
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from code_cleaner import compress_code
+from dotenv import load_dotenv
 
 # Ensure project root is on sys.path so `SecureBYTE_AI` package is importable
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -42,7 +43,12 @@ firebase_admin.initialize_app(cred, {
 })
 
 app = Flask(__name__)
-CORS(app)
+# Explicit CORS configuration to allow local frontend dev servers
+CORS(
+    app,
+    resources={r"/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}},
+    supports_credentials=True
+)
 
 # Initialize Flask-Limiter
 limiter = Limiter(
@@ -51,6 +57,18 @@ limiter = Limiter(
 )
 
 limiter.init_app(app)
+
+# Safely confirm presence of OpenAI API key without printing it
+# Load .env from the backend directory explicitly to ensure availability
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+try:
+    from SecureBYTE_AI.config import validate_api_key as _validate_openai_key
+    if _validate_openai_key("openai"):
+        print("OpenAI API key detected")
+    else:
+        print("OpenAI API key not detected")
+except Exception as e:
+    print(f"Warning: OpenAI API key check failed: {e}")
 
 # GitHub OAuth configuration
 GITHUB_CLIENT_ID = os.environ.get('GITHUB_CLIENT_ID')
@@ -800,7 +818,8 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         
     
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        # Always return a plain dict on error so callers can detect and handle
+        return {"success": False, "error": str(e)}
 
 
 # Route for logic review
@@ -822,10 +841,15 @@ def logic_review(user_id, submission_id):
     #get response from llm
     llm_review = handle_llm_review("logic", user_id, submission_id, request.get_json())
 
+    # Normalize LLM output and handle errors consistently
+    if isinstance(llm_review, dict):
+        return jsonify(llm_review), 400
+    if isinstance(llm_review, (bytes, bytearray)):
+        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(llm_review)
-    except json.JSONDecodeError:
-        return jsonify({'error': 'Prompt returned NOT a valid JSON'}), 500
+        llm_review_obj = json.loads(str(llm_review))
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
     # Append new review
     logic_rev = submission_data.get('logicrev', [])
@@ -861,10 +885,14 @@ def testing_review(user_id, submission_id):
 
     llm_review = handle_llm_review("testing", user_id, submission_id, request.get_json())
 
+    if isinstance(llm_review, dict):
+        return jsonify(llm_review), 400
+    if isinstance(llm_review, (bytes, bytearray)):
+        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(llm_review)
-    except json.JSONDecodeError:
-        return jsonify({'error': 'Prompt returned NOT a valid JSON'}), 500
+        llm_review_obj = json.loads(str(llm_review))
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
     # Append new review 
     test_rev = submission_data.get('testingrev', [])
@@ -913,10 +941,14 @@ def security_review(user_id, project_id):
     
     llm_review = handle_llm_review("security", user_id, project_id, data)
 
+    if isinstance(llm_review, dict):
+        return jsonify(llm_review), 400
+    if isinstance(llm_review, (bytes, bytearray)):
+        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(llm_review)
-    except json.JSONDecodeError:
-        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+        llm_review_obj = json.loads(str(llm_review))
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
     # Append new review
     sec_rev = project_data.get('securityrev', [])
