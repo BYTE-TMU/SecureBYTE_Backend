@@ -195,6 +195,69 @@ def delete_project(user_id, project_id):
     
     return jsonify({'message': 'Project and related submissions deleted successfully'})
 
+@app.route('/users/<user_id>/projects/<project_id>/save', methods=['PUT'])
+def save_project(user_id, project_id):
+    """Save (update) the files changed from the code editor"""
+    data = request.json
+
+    project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
+
+    # Check if project exists
+    if not project_ref.get():
+        return jsonify({'error': 'Project not found'}), 404
+
+    failed_files = []
+
+    # Iterate over each file and update its submission
+    for file_data in data: 
+        try:
+           file_id = file_data.get('fileid', '')
+           filename =file_data.get('filename', '')
+           code = file_data.get('code', '')
+
+           #Check if a submission exists for this specific file
+           submission_ref = db.reference(f'users/{user_id}/submissions/{file_id}')
+           submission = submission_ref.get()
+
+           if not submission:
+                failed_files.append({
+                    'fileid': file_id, 
+                    'filename': filename, 
+                    'error': 'Submission not found'
+                })
+                continue
+
+           # Update the submission with new data
+           update_data = {
+                'filename': filename,
+                'code': code,
+                'updated_at': get_timestamp()
+            }
+
+           submission_ref.update(update_data)
+
+        except Exception as e:
+            failed_files.append({
+                'fileid': file_id,
+                'filename': filename,
+                'error': str(e)
+            })
+
+    # If any files failed to save, return error
+        if failed_files:
+            return jsonify({
+                'error': 'Not all files could be saved',
+                'failed_files': failed_files,
+                'total_failed': len(failed_files),
+                'total_files': len(data)
+            }), 400
+
+    # Update project's updated_at timestamp
+    project_ref.update({'updated_at': get_timestamp()})
+
+    return jsonify({'message': 'Project saved successfully'})
+
+
 # Submissions endpoints
 
 @app.route('/users/<user_id>/projects/<project_id>/submissions', methods=['POST'])
