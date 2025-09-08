@@ -35,7 +35,7 @@
 
 ## Database Schema
 
-The application uses Firebase Realtime Database with the following structure:
+The application uses Firebase Realtime Database with the following structure (current, authoritative):
 
 ```
 users/
@@ -46,24 +46,27 @@ users/
         - project_name (string, required)
         - project_desc (string, optional)
         - fileids (array of submission UUIDs)
-        - securityrev (array of strings - optional, AI review history)
-        - logicrev (array of strings - optional, AI review history)
-        - testingrev (array of strings - optional, AI review history)
+        - securityrev (array of objects - project-level security review history)
+        - github (object, optional: { repo_full_name, branch, linked_at })
         - created_at (ISO timestamp)
         - updated_at (ISO timestamp)
     submissions/
       {submission_id}/
         - id (UUID)
         - projectid (UUID reference to parent project)
-        - filename (string, required)
-        - code (string, optional)
-        - securityrev (array of strings - LLM security review output)
-        - logicrev (array of strings - LLM logic review output)
-        - testcases (array of strings - LLM test cases output)
-        - reviewpdf (string - path/identifier for LaTeX-generated PDF)
+        - filename (string, required; normalized relative path)
+        - code (string)
+        - logicrev (array of objects - LLM logic review history)
+        - testingrev (array of objects - LLM testing review history)
+        - testcases (array of strings - optional)
         - created_at (ISO timestamp)
         - updated_at (ISO timestamp)
 ```
+
+Notes and deprecations:
+- Security reviews are stored on the project (`projects.{project_id}.securityrev`).
+- The following submission fields are deprecated and ignored on update: `securityrev`, `reviewpdf`.
+- Filenames are stored as normalized, POSIX-style relative paths (no absolute paths or `..`).
 
 ## API Endpoints
 
@@ -137,6 +140,10 @@ users/
   - **Response:** `{ "message": "Submission deleted successfully" }`
   - **Note:** This also removes the submission ID from the parent project's fileids array
 
+#### Get Submission Code Only
+- `GET /users/{user_id}/submissions/{submission_id}/code`
+  - **Response:** `{ "code": "<string>" }`
+
 #### Local Folder Upload (Batch JSON)
 - `POST /users/{user_id}/projects/{project_id}/submissions/batch`
   - **Description:** Upload many files at once by sending their relative paths and contents as JSON. This preserves folder structure via the `filename` field used by the frontend file tree.
@@ -192,14 +199,77 @@ users/
     - Paths are normalized and must be relative (no `..` or absolute paths).
     - On Chromium-based browsers, the frontend can use `input[webkitdirectory]` and `file.webkitRelativePath` to populate `relative_paths` or batch JSON `path` fields.
 
+### LLM Review Endpoints
+
+All review endpoints are rate-limited to 1 request per 5 seconds per client. See Rate Limits below.
+
+- `POST /users/{user_id}/submissions/{submission_id}/logic-review`
+  - Updates the submission (e.g., with latest `code`) and appends a logic review to `submissions.{submission_id}.logicrev`.
+  - **Body (example):** `{ "code": "<latest code>" }`
+  - **Response:** `{ success, review_type: "logic", response: <JSON object> }`
+
+- `POST /users/{user_id}/submissions/{submission_id}/testing-review`
+  - Updates the submission (e.g., with latest `code`) and appends a testing review to `submissions.{submission_id}.testingrev`.
+  - **Body (example):** `{ "code": "<latest code>" }`
+  - **Response:** `{ success, review_type: "testing", response: <JSON object> }`
+
+- `POST /users/{user_id}/projects/{project_id}/security-review`
+  - Aggregates all files in the project (from `fileids`) and appends a security review to `projects.{project_id}.securityrev`.
+  - **Body:** none required
+  - **Response:** `{ success, review_type: "security", response: <JSON object> }`
+
+### GitHub Integration
+
+- `POST /auth/github/exchange-token`
+  - Exchange OAuth code for an access token. Requires `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and optional `GITHUB_REDIRECT_URI`.
+
+- `GET /users/{user_id}/github/repos`
+  - List the authenticated user's repos (supports `per_page` and `page`). Requires `Authorization: Bearer <token>`.
+
+- `POST /users/{user_id}/projects/{project_id}/github/link`
+  - Link a project to a GitHub repo and branch.
+  - **Body:** `{ "repo_full_name": "owner/name", "branch": "main" }`
+  - Stores `{ repo_full_name, branch, linked_at }` under `projects.{project_id}.github`.
+
+- `POST /users/{user_id}/projects/{project_id}/github/import`
+  - Imports repository files as submissions. Accepts optional `max_files`, `max_bytes`, and `branch`.
+  - Creates submissions for all files (no extension filter) and updates `fileids`.
+
+### History
+
+- `GET /users/{user_id}/history`
+  - Returns a reverse-chronological list of project and submission events for the user.
+
+- `GET /users/{user_id}/projects/{project_id}/history`
+  - Returns project-specific history including submission events.
+
+### Metrics
+
+- `GET /users/{user_id}/metrics`
+  - Aggregated counts across projects and submissions, severity distribution from security reviews, and recent activity.
+
+- `GET /users/{user_id}/projects/{project_id}/metrics`
+  - Metrics scoped to a single project.
+
+### Dashboard
+
+- `GET /users/{user_id}/dashboard`
+  - Quick stats, recent activity, recent projects, and recent submissions.
+
+- `GET /users/{user_id}/dashboard/summary`
+  - Summary counts and top critical issues across security reviews.
+
 ## Data Features
 
-- **User Isolation:** All data is scoped to individual users via `user_id`
-- **UUID Generation:** Projects and submissions automatically receive unique UUIDs
-- **Automatic Timestamps:** `created_at` and `updated_at` fields are managed automatically
-- **Referential Integrity:** Projects maintain references to their submissions via `fileids` array
-- **Cascading Deletes:** Deleting a project removes all associated submissions
-- **Array Support:** Supports arrays for LLM outputs (security reviews, logic reviews, test cases)
+- **User Isolation:** All data is scoped to individual users via `user_id`.
+- **UUID Generation:** Projects and submissions automatically receive unique UUIDs.
+- **Automatic Timestamps:** `created_at` and `updated_at` fields are managed automatically.
+- **Referential Integrity:** Projects maintain references to their submissions via `fileids` array.
+- **Cascading Deletes:** Deleting a project removes all associated submissions.
+- **Review Storage:** Project-level `securityrev`; submission-level `logicrev` and `testingrev`.
+- **Array Support:** Arrays of review objects and optional `testcases` arrays.
+- **GitHub Linking:** Projects can be linked to repos; imports create submissions and update `fileids`.
+- **Path Normalization:** Uploaded/imported filenames are normalized to safe, relative paths.
 
 ## Error Handling
 
@@ -211,3 +281,5 @@ users/
 ## Notes
 - The backend uses Firebase Realtime Database for storage.
 - CORS is enabled for all routes.
+- Review endpoints are rate-limited to 1 request per 5 seconds. Global limits apply (200/day, 50/hour).
+- LLM provider keys are read by `SecureBYTE_AI/config.py` from environment variables; see `SecureBYTE_AI/README.md` for configuration.
