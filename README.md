@@ -137,6 +137,61 @@ users/
   - **Response:** `{ "message": "Submission deleted successfully" }`
   - **Note:** This also removes the submission ID from the parent project's fileids array
 
+#### Local Folder Upload (Batch JSON)
+- `POST /users/{user_id}/projects/{project_id}/submissions/batch`
+  - **Description:** Upload many files at once by sending their relative paths and contents as JSON. This preserves folder structure via the `filename` field used by the frontend file tree.
+  - **Body:**
+    ```json
+    {
+      "files": [
+        { "path": "src/index.js", "content": "console.log('hi')" },
+        { "path": "src/components/App.jsx", "content": "export default function App(){}" }
+      ],
+      "max_files": 1000,
+      "max_bytes": 5242880
+    }
+    ```
+  - **Response:**
+    ```json
+    {
+      "message": "Batch upload complete",
+      "created": 2,
+      "created_ids": ["<uuid>", "<uuid>"]
+    }
+    ```
+  - **Notes:**
+    - `path` must be a relative path (no leading `/`, no `..`). Invalid paths are skipped.
+    - `max_files` and `max_bytes` are optional caps; files exceeding `max_bytes` are skipped.
+
+#### Local Folder Upload (Multipart)
+- `POST /users/{user_id}/projects/{project_id}/submissions/upload`
+  - **Description:** Upload many files using `multipart/form-data`. Optionally provide an array of relative paths aligned to the uploaded files. If no path is provided for a file, its filename is used.
+  - **Form fields:**
+    - `files`: multiple file parts (name="files")
+    - `relative_paths`: JSON array of strings aligned to `files` order (optional)
+    - `max_files`: integer (optional)
+    - `max_bytes`: integer (optional, per-file cap)
+  - **Example (pseudo):**
+    ```
+    FormData:
+      files: <File src/index.js>
+      files: <File src/components/App.jsx>
+      relative_paths: ["src/index.js", "src/components/App.jsx"]
+      max_files: 1000
+      max_bytes: 5242880
+    ```
+  - **Response:**
+    ```json
+    {
+      "message": "Upload complete",
+      "created": 2,
+      "created_ids": ["<uuid>", "<uuid>"]
+    }
+    ```
+  - **Notes:**
+    - Paths are normalized and must be relative (no `..` or absolute paths).
+    - On Chromium-based browsers, the frontend can use `input[webkitdirectory]` and `file.webkitRelativePath` to populate `relative_paths` or batch JSON `path` fields.
+
 ## Data Features
 
 - **User Isolation:** All data is scoped to individual users via `user_id`
