@@ -178,6 +178,7 @@ def delete_project(user_id, project_id):
     return jsonify({'message': 'Project and related submissions deleted successfully'})
 
 @app.route('/users/<user_id>/projects/<project_id>/save', methods=['PUT'])
+
 def save_project(user_id,project_id):
     """Save (update) the files changed from the code editor"""
     data = request.json
@@ -208,14 +209,14 @@ def save_project(user_id,project_id):
                     'error': 'Submission not found'
                 })
                 continue
-           
+
            # Update the submission with new data
            update_data = {
                 'filename': filename,
                 'code': code,
                 'updated_at': get_timestamp()
             }
-           
+
            submission_ref.update(update_data)
 
         except Exception as e:
@@ -224,7 +225,7 @@ def save_project(user_id,project_id):
                 'filename': filename,
                 'error': str(e)
             })
-    
+
     # If any files failed to save, return error
         if failed_files:
             return jsonify({
