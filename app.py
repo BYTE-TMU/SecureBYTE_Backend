@@ -1,3 +1,4 @@
+from xml.parsers.expat import errors
 import firebase_admin
 from firebase_admin import credentials, db
 from flask import Flask, request, jsonify, Response, stream_with_context
@@ -15,7 +16,6 @@ import io
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from code_cleaner import compress_code
-from dotenv import load_dotenv
 
 # Ensure project root is on sys.path so `SecureBYTE_AI` package is importable
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -43,12 +43,7 @@ firebase_admin.initialize_app(cred, {
 })
 
 app = Flask(__name__)
-# Explicit CORS configuration to allow local frontend dev servers
-CORS(
-    app,
-    resources={r"/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}},
-    supports_credentials=True
-)
+CORS(app)
 
 # Initialize Flask-Limiter
 limiter = Limiter(
@@ -57,18 +52,6 @@ limiter = Limiter(
 )
 
 limiter.init_app(app)
-
-# Safely confirm presence of OpenAI API key without printing it
-# Load .env from the backend directory explicitly to ensure availability
-load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
-try:
-    from SecureBYTE_AI.config import validate_api_key as _validate_openai_key
-    if _validate_openai_key("openai"):
-        print("OpenAI API key detected")
-    else:
-        print("OpenAI API key not detected")
-except Exception as e:
-    print(f"Warning: OpenAI API key check failed: {e}")
 
 # GitHub OAuth configuration
 GITHUB_CLIENT_ID = os.environ.get('GITHUB_CLIENT_ID')
@@ -141,7 +124,6 @@ def get_projects(user_id):
     
     # Convert to list format
     result = list(projects.values())
-    
     return jsonify(result)
 
 @app.route('/users/<user_id>/projects/<project_id>', methods=['GET'])
@@ -886,8 +868,7 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         
     
     except Exception as e:
-        # Always return a plain dict on error so callers can detect and handle
-        return {"success": False, "error": str(e)}
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # Route for logic review
@@ -909,15 +890,10 @@ def logic_review(user_id, submission_id):
     #get response from llm
     llm_review = handle_llm_review("logic", user_id, submission_id, request.get_json())
 
-    # Normalize LLM output and handle errors consistently
-    if isinstance(llm_review, dict):
-        return jsonify(llm_review), 400
-    if isinstance(llm_review, (bytes, bytearray)):
-        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(str(llm_review))
-    except Exception as e:
-        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Prompt returned NOT a valid JSON'}), 500
 
     # Append new review
     logic_rev = submission_data.get('logicrev', [])
@@ -953,14 +929,10 @@ def testing_review(user_id, submission_id):
 
     llm_review = handle_llm_review("testing", user_id, submission_id, request.get_json())
 
-    if isinstance(llm_review, dict):
-        return jsonify(llm_review), 400
-    if isinstance(llm_review, (bytes, bytearray)):
-        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(str(llm_review))
-    except Exception as e:
-        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Prompt returned NOT a valid JSON'}), 500
 
     # Append new review 
     test_rev = submission_data.get('testingrev', [])
@@ -1009,14 +981,10 @@ def security_review(user_id, project_id):
     
     llm_review = handle_llm_review("security", user_id, project_id, data)
 
-    if isinstance(llm_review, dict):
-        return jsonify(llm_review), 400
-    if isinstance(llm_review, (bytes, bytearray)):
-        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(str(llm_review))
-    except Exception as e:
-        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
 
     # Append new review
     sec_rev = project_data.get('securityrev', [])
@@ -1146,6 +1114,153 @@ def is_supported_text_file(path):
     if basename in ['makefile', 'dockerfile', 'license', 'readme']:
         return True
     return False
+
+def normalize_relative_path(path: str) -> str:
+    """
+    Normalize a user-supplied relative path. Reject absolute paths or traversal.
+    Returns a posix-style path (forward slashes).
+    """
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("Empty path")
+    candidate = path.replace('\\', '/').lstrip('./').lstrip('/')
+    norm = os.path.normpath(candidate)
+    if os.path.isabs(norm) or norm.startswith('..'):
+        raise ValueError("Invalid path")
+    return norm.replace(os.sep, '/')
+
+@app.route('/users/<user_id>/projects/<project_id>/submissions/batch', methods=['POST'])
+def create_submissions_batch(user_id, project_id):
+    """
+    JSON batch upload.
+    Body: { "files": [{"path": "src/index.js", "content": "..."}, ...], "max_files"?: int, "max_bytes"?: int }
+    """
+    data = request.get_json(silent=True) or {}
+    files = data.get('files') or []
+    max_files = data.get('max_files')
+    max_bytes = data.get('max_bytes')
+
+    if not isinstance(files, list) or len(files) == 0:
+        return jsonify({'error': 'files must be a non-empty array'}), 400
+
+    project_ref = get_project_ref(user_id, project_id)
+    project = project_ref.get()
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    created = 0
+    created_ids = []
+    fileids = project.get('fileids', [])
+
+    for f in files:
+        raw_path = (f or {}).get('path') or (f or {}).get('filename')
+        content = (f or {}).get('content')
+        if content is None:
+            content = (f or {}).get('code', '')
+        if not raw_path:
+            continue
+        try:
+            relpath = normalize_relative_path(raw_path)
+        except ValueError:
+            continue
+
+        try:
+            size_bytes = len((content or '').encode('utf-8', errors='ignore'))
+        except Exception:
+            size_bytes = 0
+        if isinstance(max_bytes, int) and max_bytes > 0 and size_bytes > max_bytes:
+            continue
+
+        submission_id = str(uuid.uuid4())
+        submission_data = {
+            'id': submission_id,
+            'projectid': project_id,
+            'filename': relpath,
+            'code': content or '',
+            'logicrev': [],
+            'testcases': [],
+            'created_at': get_timestamp(),
+            'updated_at': get_timestamp()
+        }
+        get_submission_ref(user_id, submission_id).set(submission_data)
+        fileids.append(submission_id)
+        created_ids.append(submission_id)
+        created += 1
+
+        if isinstance(max_files, int) and max_files > 0 and created >= max_files:
+            break
+
+    project_ref.update({'fileids': fileids, 'updated_at': get_timestamp()})
+    return jsonify({'message': 'Batch upload complete', 'created': created, 'created_ids': created_ids}), 201
+
+@app.route('/users/<user_id>/projects/<project_id>/submissions/upload', methods=['POST'])
+def upload_submissions_multipart(user_id, project_id):
+    """
+    Multipart upload.
+    Expect fields:
+      - files: multiple file parts (name='files')
+      - relative_paths: JSON array of paths aligned to files (optional)
+      - max_files: optional int
+      - max_bytes: optional int (per-file cap)
+    """
+    project_ref = get_project_ref(user_id, project_id)
+    project = project_ref.get()
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    storage_files = request.files.getlist('files')
+    rel_paths_raw = request.form.get('relative_paths', '')
+    try:
+        rel_paths = json.loads(rel_paths_raw) if rel_paths_raw else []
+        if not isinstance(rel_paths, list):
+            rel_paths = []
+    except Exception:
+        rel_paths = []
+
+    max_files = request.form.get('max_files', type=int)
+    max_bytes = request.form.get('max_bytes', type=int)
+
+    created = 0
+    created_ids = []
+    fileids = project.get('fileids', [])
+
+    for idx, storage in enumerate(storage_files):
+        if not storage:
+            continue
+        proposed_path = rel_paths[idx] if idx < len(rel_paths) else storage.filename
+        try:
+            relpath = normalize_relative_path(proposed_path)
+        except ValueError:
+            continue
+
+        data_bytes = storage.read() or b''
+        if isinstance(max_bytes, int) and max_bytes > 0 and len(data_bytes) > max_bytes:
+            continue
+        try:
+            code_str = data_bytes.decode('utf-8', errors='replace')
+        except Exception:
+            code_str = ''
+
+        submission_id = str(uuid.uuid4())
+        submission_data = {
+            'id': submission_id,
+            'projectid': project_id,
+            'filename': relpath,
+            'code': code_str,
+            'logicrev': [],
+            'testcases': [],
+            'created_at': get_timestamp(),
+            'updated_at': get_timestamp()
+        }
+        get_submission_ref(user_id, submission_id).set(submission_data)
+        fileids.append(submission_id)
+        created_ids.append(submission_id)
+        created += 1
+
+        if isinstance(max_files, int) and max_files > 0 and created >= max_files:
+            break
+
+    project_ref.update({'fileids': fileids, 'updated_at': get_timestamp()})
+    return jsonify({'message': 'Upload complete', 'created': created, 'created_ids': created_ids}), 201
 
 @app.route('/users/<user_id>/projects/<project_id>/github/link', methods=['POST'])
 def link_github_repo(user_id, project_id):
