@@ -1,3 +1,4 @@
+from xml.parsers.expat import errors
 import firebase_admin
 from firebase_admin import credentials, db
 from flask import Flask, request, jsonify, Response, stream_with_context
@@ -15,7 +16,6 @@ import io
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from code_cleaner import compress_code
-from dotenv import load_dotenv
 
 # Ensure project root is on sys.path so `SecureBYTE_AI` package is importable
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -43,12 +43,7 @@ firebase_admin.initialize_app(cred, {
 })
 
 app = Flask(__name__)
-# Explicit CORS configuration to allow local frontend dev servers
-CORS(
-    app,
-    resources={r"/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}},
-    supports_credentials=True
-)
+CORS(app)
 
 # Initialize Flask-Limiter
 limiter = Limiter(
@@ -57,18 +52,6 @@ limiter = Limiter(
 )
 
 limiter.init_app(app)
-
-# Safely confirm presence of OpenAI API key without printing it
-# Load .env from the backend directory explicitly to ensure availability
-load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
-try:
-    from SecureBYTE_AI.config import validate_api_key as _validate_openai_key
-    if _validate_openai_key("openai"):
-        print("OpenAI API key detected")
-    else:
-        print("OpenAI API key not detected")
-except Exception as e:
-    print(f"Warning: OpenAI API key check failed: {e}")
 
 # GitHub OAuth configuration
 GITHUB_CLIENT_ID = os.environ.get('GITHUB_CLIENT_ID')
@@ -141,7 +124,6 @@ def get_projects(user_id):
     
     # Convert to list format
     result = list(projects.values())
-    
     return jsonify(result)
 
 @app.route('/users/<user_id>/projects/<project_id>', methods=['GET'])
@@ -194,6 +176,69 @@ def delete_project(user_id, project_id):
     project_ref.delete()
     
     return jsonify({'message': 'Project and related submissions deleted successfully'})
+
+@app.route('/users/<user_id>/projects/<project_id>/save', methods=['PUT'])
+def save_project(user_id,project_id):
+    """Save (update) the files changed from the code editor"""
+    data = request.json
+    
+    project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
+    
+    # Check if project exists
+    if not project_ref.get():
+        return jsonify({'error': 'Project not found'}), 404
+    
+    failed_files = []
+    
+    # Iterate over each file and update its submission
+    for file_data in data: 
+        try:
+           file_id = file_data.get('fileid', '')
+           filename =file_data.get('filename', '')
+           code = file_data.get('code', '')
+
+           #Check if a submission exists for this specific file
+           submission_ref = db.reference(f'users/{user_id}/submissions/{file_id}')
+           submission = submission_ref.get()
+
+           if not submission:
+                failed_files.append({
+                    'fileid': file_id, 
+                    'filename': filename, 
+                    'error': 'Submission not found'
+                })
+                continue
+           
+           # Update the submission with new data
+           update_data = {
+                'filename': filename,
+                'code': code,
+                'updated_at': get_timestamp()
+            }
+           
+           submission_ref.update(update_data)
+
+        except Exception as e:
+            failed_files.append({
+                'fileid': file_id,
+                'filename': filename,
+                'error': str(e)
+            })
+    
+    # If any files failed to save, return error
+        if failed_files:
+            return jsonify({
+                'error': 'Not all files could be saved',
+                'failed_files': failed_files,
+                'total_failed': len(failed_files),
+                'total_files': len(data)
+            }), 400
+
+    # Update project's updated_at timestamp
+    project_ref.update({'updated_at': get_timestamp()})
+
+    return jsonify({'message': 'Project saved successfully'})
+
 
 # Submissions endpoints
 
@@ -818,8 +863,7 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         
     
     except Exception as e:
-        # Always return a plain dict on error so callers can detect and handle
-        return {"success": False, "error": str(e)}
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # Route for logic review
@@ -841,15 +885,10 @@ def logic_review(user_id, submission_id):
     #get response from llm
     llm_review = handle_llm_review("logic", user_id, submission_id, request.get_json())
 
-    # Normalize LLM output and handle errors consistently
-    if isinstance(llm_review, dict):
-        return jsonify(llm_review), 400
-    if isinstance(llm_review, (bytes, bytearray)):
-        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(str(llm_review))
-    except Exception as e:
-        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Prompt returned NOT a valid JSON'}), 500
 
     # Append new review
     logic_rev = submission_data.get('logicrev', [])
@@ -885,14 +924,10 @@ def testing_review(user_id, submission_id):
 
     llm_review = handle_llm_review("testing", user_id, submission_id, request.get_json())
 
-    if isinstance(llm_review, dict):
-        return jsonify(llm_review), 400
-    if isinstance(llm_review, (bytes, bytearray)):
-        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(str(llm_review))
-    except Exception as e:
-        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Prompt returned NOT a valid JSON'}), 500
 
     # Append new review 
     test_rev = submission_data.get('testingrev', [])
@@ -941,14 +976,10 @@ def security_review(user_id, project_id):
     
     llm_review = handle_llm_review("security", user_id, project_id, data)
 
-    if isinstance(llm_review, dict):
-        return jsonify(llm_review), 400
-    if isinstance(llm_review, (bytes, bytearray)):
-        llm_review = llm_review.decode('utf-8', errors='ignore')
     try:
-        llm_review_obj = json.loads(str(llm_review))
-    except Exception as e:
-        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
+        llm_review_obj = json.loads(llm_review)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
 
     # Append new review
     sec_rev = project_data.get('securityrev', [])
