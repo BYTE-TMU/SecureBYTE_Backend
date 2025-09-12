@@ -5,3 +5,4 @@ firebase.json
 .venv
 venv
 rtdb_migrate_to_v2.py
+__pycache__/

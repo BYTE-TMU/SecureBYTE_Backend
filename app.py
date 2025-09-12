@@ -200,6 +200,10 @@ def save_project(user_id, project_id):
     """Save (update) the files changed from the code editor"""
     data = request.json
 
+    # Basic payload validation
+    if not isinstance(data, list):
+        return jsonify({'error': 'Request body must be a JSON array of files'}), 400
+
     project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
 
     # Check if project exists
@@ -207,50 +211,51 @@ def save_project(user_id, project_id):
         return jsonify({'error': 'Project not found'}), 404
 
     failed_files = []
+    candidates = []  # Collect valid updates before applying (atomic behavior)
 
-    # Iterate over each file and update its submission
-    for file_data in data: 
-        try:
-           file_id = file_data.get('fileid', '')
-           filename =file_data.get('filename', '')
-           code = file_data.get('code', '')
+    # First pass: validate and stage updates
+    try:
+        for file_data in data:
+            if not isinstance(file_data, dict):
+                failed_files.append({'error': 'Invalid item type', 'item': file_data})
+                continue
+            file_id = file_data.get('fileid', '')
+            filename = file_data.get('filename', '')
+            code = file_data.get('code', '')
 
-           #Check if a submission exists for this specific file
-           submission_ref = db.reference(f'users/{user_id}/submissions/{file_id}')
-           submission = submission_ref.get()
-
-           if not submission:
-                failed_files.append({
-                    'fileid': file_id, 
-                    'filename': filename, 
-                    'error': 'Submission not found'
-                })
+            if not file_id:
+                failed_files.append({'fileid': file_id, 'filename': filename, 'error': 'fileid is required'})
                 continue
 
-           # Update the submission with new data
-           update_data = {
-                'filename': filename,
-                'code': code,
-                'updated_at': get_timestamp()
-            }
+            submission_ref = db.reference(f'users/{user_id}/submissions/{file_id}')
+            submission = submission_ref.get()
+            if not submission:
+                failed_files.append({'fileid': file_id, 'filename': filename, 'error': 'Submission not found'})
+                continue
 
-           submission_ref.update(update_data)
-
-        except Exception as e:
-            failed_files.append({
-                'fileid': file_id,
-                'filename': filename,
-                'error': str(e)
+            candidates.append({
+                'ref': submission_ref,
+                'update': {
+                    'filename': filename,
+                    'code': code,
+                    'updated_at': get_timestamp()
+                }
             })
+    except Exception as e:
+        failed_files.append({'error': str(e)})
 
-    # If any files failed to save, return error
-        if failed_files:
-            return jsonify({
-                'error': 'Not all files could be saved',
-                'failed_files': failed_files,
-                'total_failed': len(failed_files),
-                'total_files': len(data)
-            }), 400
+    # If any files failed in validation, return error without applying any updates
+    if failed_files:
+        return jsonify({
+            'error': 'Not all files could be saved',
+            'failed_files': failed_files,
+            'total_failed': len(failed_files),
+            'total_files': len(data)
+        }), 400
+
+    # Second pass: apply all staged updates
+    for item in candidates:
+        item['ref'].update(item['update'])
 
     # Update project's updated_at timestamp
     project_ref.update({'updated_at': get_timestamp()})
