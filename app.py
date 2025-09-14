@@ -904,10 +904,20 @@ def logic_review(user_id, submission_id):
     #get response from llm
     llm_review = handle_llm_review("logic", user_id, submission_id, request.get_json())
 
+    # Normalize LLM output and handle errors consistently
+    if isinstance(llm_review, tuple):
+        return llm_review
+    if isinstance(llm_review, dict):
+        return jsonify(llm_review), 400
+    if isinstance(llm_review, (bytes, bytearray)):
+        try:
+            llm_review = llm_review.decode('utf-8', errors='ignore')
+        except Exception:
+            llm_review = str(llm_review)
     try:
-        llm_review_obj = json.loads(llm_review)
-    except json.JSONDecodeError:
-        return jsonify({'error': 'Prompt returned NOT a valid JSON'}), 500
+        llm_review_obj = json.loads(str(llm_review))
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
     # Append new review
     logic_rev = submission_data.get('logicrev', [])
@@ -943,10 +953,20 @@ def testing_review(user_id, submission_id):
 
     llm_review = handle_llm_review("testing", user_id, submission_id, request.get_json())
 
+    # Normalize LLM output and handle errors consistently
+    if isinstance(llm_review, tuple):
+        return llm_review
+    if isinstance(llm_review, dict):
+        return jsonify(llm_review), 400
+    if isinstance(llm_review, (bytes, bytearray)):
+        try:
+            llm_review = llm_review.decode('utf-8', errors='ignore')
+        except Exception:
+            llm_review = str(llm_review)
     try:
-        llm_review_obj = json.loads(llm_review)
-    except json.JSONDecodeError:
-        return jsonify({'error': 'Prompt returned NOT a valid JSON'}), 500
+        llm_review_obj = json.loads(str(llm_review))
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
     # Append new review 
     test_rev = submission_data.get('testingrev', [])
@@ -995,10 +1015,20 @@ def security_review(user_id, project_id):
     
     llm_review = handle_llm_review("security", user_id, project_id, data)
 
+    # Normalize LLM output and handle errors consistently
+    if isinstance(llm_review, tuple):
+        return llm_review
+    if isinstance(llm_review, dict):
+        return jsonify(llm_review), 400
+    if isinstance(llm_review, (bytes, bytearray)):
+        try:
+            llm_review = llm_review.decode('utf-8', errors='ignore')
+        except Exception:
+            llm_review = str(llm_review)
     try:
-        llm_review_obj = json.loads(llm_review)
-    except json.JSONDecodeError:
-        return jsonify({'error': 'Invalid JSON returned from LLM'}), 500
+        llm_review_obj = json.loads(str(llm_review))
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
     # Append new review
     sec_rev = project_data.get('securityrev', [])
