@@ -43,7 +43,8 @@ firebase_admin.initialize_app(cred, {
 })
 
 app = Flask(__name__)
-CORS(app)
+# Match CORS setup from feature/CORS-secuirty-rev: allow all origins
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Initialize Flask-Limiter
 limiter = Limiter(
