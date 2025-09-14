@@ -44,12 +44,8 @@ firebase_admin.initialize_app(cred, {
 })
 
 app = Flask(__name__)
-# Explicit CORS configuration to allow local frontend dev servers
-CORS(
-    app,
-    resources={r"/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}},
-    supports_credentials=True
-)
+# Relaxed CORS to unblock frontend: allow all origins (no credentials)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Initialize Flask-Limiter
 limiter = Limiter(
