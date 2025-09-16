@@ -1,0 +1,363 @@
+{
+  "info": {
+    "_postman_id": "3b0a7c6e-0d6a-4d8d-9b8a-2c8c1b9a7b10",
+    "name": "SecureBYTE Review API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Collection to test SecureBYTE review endpoints: logic, testing, and security. Run Setup → Create Project, then Setup → Create Submission, then use the three review requests. Endpoints are rate-limited to 1 request per 5 seconds."
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:5000", "type": "string" },
+    { "key": "user_id", "value": "", "type": "string" },
+    { "key": "project_id", "value": "", "type": "string" },
+    { "key": "submission_id", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Setup",
+      "item": [
+        {
+          "name": "Create Project",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Ensure user_id is set; generate if missing",
+                  "(function(){",
+                  "  var current = pm.collectionVariables.get('user_id');",
+                  "  if (!current) {",
+                  "    var guid = pm.variables.replaceIn('{{$guid}}');",
+                  "    var uid = 'tester-' + guid;",
+                  "    pm.collectionVariables.set('user_id', uid);",
+                  "    console.log('user_id set to', uid);",
+                  "  }",
+                  "})();"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "try {",
+                  "  var data = pm.response.json();",
+                  "  if (data && data.projectid) {",
+                  "    pm.collectionVariables.set('project_id', data.projectid);",
+                  "    console.log('project_id set to', data.projectid);",
+                  "  }",
+                  "} catch (e) {",
+                  "  console.warn('Response not JSON');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_name\": \"sec-review-demo\",\n  \"project_desc\": \"created from Postman\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/projects",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "projects"
+              ]
+            },
+            "description": "Creates a project for the configured user and stores project_id as a collection variable."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Submission",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('project_id')) {",
+                  "  throw new Error('project_id is not set. Run Setup → Create Project first.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "try {",
+                  "  var data = pm.response.json();",
+                  "  if (data && data.id) {",
+                  "    pm.collectionVariables.set('submission_id', data.id);",
+                  "    console.log('submission_id set to', data.id);",
+                  "  }",
+                  "} catch (e) {",
+                  "  console.warn('Response not JSON');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filename\": \"insecure.py\",\n  \"code\": \"def foo():\\n    return 1\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/projects/{{project_id}}/submissions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "projects",
+                "{{project_id}}",
+                "submissions"
+              ]
+            },
+            "description": "Creates a submission under the project and stores submission_id as a collection variable."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Project",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/projects/{{project_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "projects",
+                "{{project_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Submission",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/submissions/{{submission_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "submissions",
+                "{{submission_id}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Reviews",
+      "item": [
+        {
+          "name": "Logic Review",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('submission_id')) {",
+                  "  throw new Error('submission_id is not set. Run Setup → Create Submission first.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"def foo():\\n    return 1\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/submissions/{{submission_id}}/logic-review",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "submissions",
+                "{{submission_id}}",
+                "logic-review"
+              ]
+            },
+            "description": "Triggers a logic review for the submission."
+          },
+          "response": []
+        },
+        {
+          "name": "Testing Review",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('submission_id')) {",
+                  "  throw new Error('submission_id is not set. Run Setup → Create Submission first.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"def foo():\\n    return 1\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/submissions/{{submission_id}}/testing-review",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "submissions",
+                "{{submission_id}}",
+                "testing-review"
+              ]
+            },
+            "description": "Triggers a test cases review for the submission."
+          },
+          "response": []
+        },
+        {
+          "name": "Security Review",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('project_id')) {",
+                  "  throw new Error('project_id is not set. Run Setup → Create Project first.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/projects/{{project_id}}/security-review",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "projects",
+                "{{project_id}}",
+                "security-review"
+              ]
+            },
+            "description": "Triggers a security review for the project (aggregates all files)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Teardown (optional)",
+      "item": [
+        {
+          "name": "Delete Submission",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/submissions/{{submission_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "submissions",
+                "{{submission_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Project",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/projects/{{project_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "projects",
+                "{{project_id}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
+
+

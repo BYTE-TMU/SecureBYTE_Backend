@@ -849,14 +849,17 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         code = json.dumps(files_data, indent=2)
         
     else:
-        # For logic and testing reviews, data has a 'code' field
-        original_code = data.get('code', '')
+        # For logic and testing reviews, data should have code
+        original_code = (data or {}).get('code', '') if isinstance(data, dict) else ''
+        # Accept common aliases from frontend
+        if not original_code and isinstance(data, dict):
+            original_code = data.get('content', '') or data.get('raw', '')
 
         # Clean the code before sending to LLM
         code = compress_code(original_code)
 
         if not code:
-            return {"success": False, "error": "Missing 'code'"}
+            return {"success": False, "error": "Missing code in request body"}
 
     if llm is None:
         return {"success": False, "error": "LLM not available on server"}
@@ -872,13 +875,25 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         response = llm.generate_response(user_prompt=prompt)
         print(f"response: {response}")
 
+        # If LLM returns a dict/list, pass it through as JSON-compatible
+        if isinstance(response, (dict, list)):
+            return response
+
         # Handle both string and generator responses
         if hasattr(response, 'system_prompt'):
-            full_response = ''.join(response.system_prompt)
-        else:
-            full_response = str(response)
+            try:
+                return ''.join(response.system_prompt)
+            except Exception:
+                return str(response)
 
-        return full_response
+        # If bytes, decode; else coerce to string
+        if isinstance(response, (bytes, bytearray)):
+            try:
+                return response.decode('utf-8', errors='ignore')
+            except Exception:
+                return str(response)
+
+        return str(response)
         
     
     except Exception as e:
@@ -908,7 +923,25 @@ def logic_review(user_id, submission_id):
     if isinstance(llm_review, tuple):
         return llm_review
     if isinstance(llm_review, dict):
-        return jsonify(llm_review), 400
+        # Treat dict as success unless it explicitly signals an error
+        if llm_review.get('success') is False or 'error' in llm_review:
+            return jsonify(llm_review), 400
+        llm_review_obj = llm_review
+        # Append new review and return success
+        logic_rev = submission_data.get('logicrev', [])
+        logic_rev.append({
+            "review": llm_review_obj    
+        })
+        ref.update({
+            "logicrev": logic_rev
+        })
+        return jsonify({
+            "success": True,
+            "review_type": "logic",
+            "user_id": user_id,
+            "submission_id": submission_id,
+            "response": llm_review_obj
+        })
     if isinstance(llm_review, (bytes, bytearray)):
         try:
             llm_review = llm_review.decode('utf-8', errors='ignore')
@@ -957,7 +990,25 @@ def testing_review(user_id, submission_id):
     if isinstance(llm_review, tuple):
         return llm_review
     if isinstance(llm_review, dict):
-        return jsonify(llm_review), 400
+        # Treat dict as success unless it explicitly signals an error
+        if llm_review.get('success') is False or 'error' in llm_review:
+            return jsonify(llm_review), 400
+        llm_review_obj = llm_review
+        # Append new review and return success
+        test_rev = submission_data.get('testingrev', [])
+        test_rev.append({
+            "review": llm_review_obj
+        })
+        ref.update({
+            "testingrev": test_rev
+        })
+        return jsonify({
+            "success": True,
+            "review_type": "testing",
+            "user_id": user_id,
+            "submission_id": submission_id,
+            "response": llm_review_obj
+        })
     if isinstance(llm_review, (bytes, bytearray)):
         try:
             llm_review = llm_review.decode('utf-8', errors='ignore')
@@ -1019,7 +1070,25 @@ def security_review(user_id, project_id):
     if isinstance(llm_review, tuple):
         return llm_review
     if isinstance(llm_review, dict):
-        return jsonify(llm_review), 400
+        # Treat dict as success unless it explicitly signals an error
+        if llm_review.get('success') is False or 'error' in llm_review:
+            return jsonify(llm_review), 400
+        llm_review_obj = llm_review
+        # Append new review and return success
+        sec_rev = project_data.get('securityrev', [])
+        sec_rev.append({
+            "review": llm_review_obj
+        })
+        ref.update({
+            "securityrev": sec_rev
+        })  
+        return jsonify({
+            "success": True,
+            "review_type": "security",
+            "user_id": user_id,
+            "project_id": project_id,
+            "response": llm_review_obj
+        })
     if isinstance(llm_review, (bytes, bytearray)):
         try:
             llm_review = llm_review.decode('utf-8', errors='ignore')

@@ -123,9 +123,14 @@ def client(mock_firebase_and_llm):
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     if base_dir not in sys.path:
         sys.path.insert(0, base_dir)
-    from app import app
-    app.config['TESTING'] = True
-    return app.test_client()
+    import app as backend
+    backend.app.config['TESTING'] = True
+    # Disable rate limiting during tests to avoid 429s from per-route limits
+    try:
+        backend.limiter.enabled = False  # Flask-Limiter >=3 supports toggling enabled
+    except Exception:
+        pass
+    return backend.app.test_client()
 
 
 def _project_ref_path(user_id, project_id):
@@ -191,4 +196,133 @@ def test_testing_review_happy_path(client):
     assert body["submission_id"] == submission_id
     assert isinstance(body["response"], dict)
 
+
+
+def test_security_review_happy_path(client):
+    user_id = 'u3'
+    # Create project
+    resp = client.post(f"/users/{user_id}/projects", json={"project_name": "p3"})
+    assert resp.status_code == 201
+    project_id = resp.get_json()["projectid"]
+
+    # Create submission
+    resp = client.post(
+        f"/users/{user_id}/projects/{project_id}/submissions",
+        json={"filename": "file.py", "code": "def foo():\n    return 1"},
+    )
+    assert resp.status_code == 201
+
+    # Call security review
+    resp = client.post(
+        f"/users/{user_id}/projects/{project_id}/security-review",
+        json={},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["success"] is True
+    assert body["review_type"] == "security"
+    assert body["project_id"] == project_id
+    assert isinstance(body["response"], dict)
+
+
+def test_logic_review_accepts_dict_response(client, monkeypatch):
+    """The LLM may return a Python dict; backend should treat it as success."""
+    user_id = 'u4'
+    # Create project and submission
+    resp = client.post(f"/users/{user_id}/projects", json={"project_name": "p4"})
+    assert resp.status_code == 201
+    project_id = resp.get_json()["projectid"]
+    resp = client.post(
+        f"/users/{user_id}/projects/{project_id}/submissions",
+        json={"filename": "file.py", "code": "def foo():\n    return 1"},
+    )
+    assert resp.status_code == 201
+    submission_id = resp.get_json()["id"]
+
+    # Patch app.llm to return a Python dict
+    import app as backend
+    class DictLLM:
+        def generate_response(self, user_prompt: str, system_prompt: str = None, custom_config=None):
+            return {"review_time": "t", "files": []}
+    backend.llm = DictLLM()
+
+    resp = client.post(
+        f"/users/{user_id}/submissions/{submission_id}/logic-review",
+        json={"code": "print(1)"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data.get("success") is True
+    assert isinstance(data.get("response"), dict)
+
+
+def test_testing_review_accepts_dict_response(client, monkeypatch):
+    user_id = 'u5'
+    resp = client.post(f"/users/{user_id}/projects", json={"project_name": "p5"})
+    assert resp.status_code == 201
+    project_id = resp.get_json()["projectid"]
+    resp = client.post(
+        f"/users/{user_id}/projects/{project_id}/submissions",
+        json={"filename": "file.py", "code": "def foo():\n    return 1"},
+    )
+    assert resp.status_code == 201
+    submission_id = resp.get_json()["id"]
+
+    import app as backend
+    class DictLLM:
+        def generate_response(self, *_args, **_kwargs):
+            return {"review_time": "t", "files": []}
+    backend.llm = DictLLM()
+
+    resp = client.post(
+        f"/users/{user_id}/submissions/{submission_id}/testing-review",
+        json={"code": "print(1)"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data.get("success") is True
+    assert isinstance(data.get("response"), dict)
+
+
+def test_logic_review_accepts_content_alias(client):
+    """Payload with 'content' (alias for code) should be accepted."""
+    user_id = 'u6'
+    # Create project and submission
+    resp = client.post(f"/users/{user_id}/projects", json={"project_name": "p6"})
+    assert resp.status_code == 201
+    project_id = resp.get_json()["projectid"]
+    resp = client.post(
+        f"/users/{user_id}/projects/{project_id}/submissions",
+        json={"filename": "file.py", "code": "print(0)"},
+    )
+    assert resp.status_code == 201
+    submission_id = resp.get_json()["id"]
+
+    resp = client.post(
+        f"/users/{user_id}/submissions/{submission_id}/logic-review",
+        json={"content": "print(2)"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+
+def test_logic_review_missing_code_returns_clear_error(client):
+    user_id = 'u7'
+    resp = client.post(f"/users/{user_id}/projects", json={"project_name": "p7"})
+    assert resp.status_code == 201
+    project_id = resp.get_json()["projectid"]
+    resp = client.post(
+        f"/users/{user_id}/projects/{project_id}/submissions",
+        json={"filename": "file.py", "code": "print(0)"},
+    )
+    assert resp.status_code == 201
+    submission_id = resp.get_json()["id"]
+
+    # Send empty body
+    resp = client.post(
+        f"/users/{user_id}/submissions/{submission_id}/logic-review",
+        json={},
+    )
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "error" in data
 
