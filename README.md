@@ -27,11 +27,22 @@
      python app.py
      ```
 
+  - Alternatively, create a `.env` file in `SecureBYTE_Backend/` with:
+    ```env
+    FIREBASE_SERVICE_ACCOUNT=/absolute/path/to/firebase.json
+    GITHUB_CLIENT_ID=your_client_id
+    GITHUB_CLIENT_SECRET=your_client_secret
+    GITHUB_REDIRECT_URI=https://yourapp.example.com/callback
+    ```
+    The app will automatically load this file at startup.
+
 ## Environment Variables
 - `FIREBASE_SERVICE_ACCOUNT`: Path to your Firebase service account JSON file. **Required.**
 - `GITHUB_CLIENT_ID`: GitHub OAuth app client ID. **Required for token exchange endpoint.**
 - `GITHUB_CLIENT_SECRET`: GitHub OAuth app client secret. **Required for token exchange endpoint.**
 - `GITHUB_REDIRECT_URI`: Redirect URI used in OAuth flow. **Optional if the frontend sends it in the request.**
+
+You can set these in your shell as shown above, or place them in a `.env` file in `SecureBYTE_Backend/`.
 
 ## Database Schema
 
@@ -65,7 +76,7 @@ users/
 
 Notes and deprecations:
 - Security reviews are stored on the project (`projects.{project_id}.securityrev`).
-- The following submission fields are deprecated and ignored on update: `securityrev`, `reviewpdf`.
+- The following submission fields are deprecated and ignored on create and update: `securityrev`, `reviewpdf`.
 - Filenames are stored as normalized, POSIX-style relative paths (no absolute paths or `..`).
 
 ## API Endpoints
@@ -105,6 +116,30 @@ Notes and deprecations:
   - **Response:** `{ "message": "Project and related submissions deleted successfully" }`
   - **Note:** This also deletes all submissions associated with the project
 
+#### Save Project Files
+- `PUT /users/{user_id}/projects/{project_id}/save`
+  - **Description:** Atomically save multiple edited files within a project. If any file fails validation, no updates are applied.
+  - **Body (array of files):**
+    ```json
+    [
+      {
+        "fileid": "<submission uuid>",
+        "filename": "relative/path/to/file.ext",
+        "code": "<updated file contents>"
+      }
+    ]
+    ```
+  - **Success Response:** `{ "message": "Project saved successfully" }`
+  - **Failure (400):**
+    ```json
+    {
+      "error": "Not all files could be saved",
+      "failed_files": [ { "fileid": "...", "filename": "...", "error": "..." } ],
+      "total_failed": 1,
+      "total_files": 3
+    }
+    ```
+
 ### Submissions
 
 #### Create Submission
@@ -114,13 +149,11 @@ Notes and deprecations:
     {
       "filename": "string (required)",
       "code": "string (optional)",
-      "securityrev": ["array of strings (optional)"],
-      "logicrev": ["array of strings (optional)"],
-      "testcases": ["array of strings (optional)"],
-      "reviewpdf": "string (optional)"
+      "testcases": ["array of strings (optional)"]
     }
     ```
   - **Response:** `{ "id": "<uuid>", "message": "Submission created successfully" }`
+  - **Notes:** Deprecated fields `securityrev` and `reviewpdf` are ignored.
 
 #### Get All Submissions for Project
 - `GET /users/{user_id}/projects/{project_id}/submissions`
