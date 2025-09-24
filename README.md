@@ -1,48 +1,179 @@
 # SecureBYTE_Backend
 
-## Setup Instructions
+## Beginner-Friendly Setup Guide
 
-1. **Clone the repository** and navigate to the project directory.
-2. **Install dependencies:**
-   ```sh
-   pip install -r requirements.txt
-   ```
-3. **Add your Firebase service account JSON file:**
-   - Download your Firebase service account JSON from the Firebase Console.
-   - Place it in the project directory and rename it to `firebase.json` (or use your preferred name, but update the path accordingly).
-4. **Set the environment variable** before running the app (replace the path with your actual file path):
-   - **Windows PowerShell:**
-     ```powershell
-     $env:FIREBASE_SERVICE_ACCOUNT="C:\\path\\to\\your\\firebase.json"
-     python app.py
-     ```
-   - **Linux/macOS:**
-     ```sh
-     export FIREBASE_SERVICE_ACCOUNT="/path/to/your/firebase.json"
-     python app.py
-     ```
-   - Or, if your `firebase.json` is in the project root, you can use:
-     ```sh
-     export FIREBASE_SERVICE_ACCOUNT="$(pwd)/firebase.json"
-     python app.py
-     ```
+This backend is a Python Flask REST API that stores data in Firebase Realtime Database and integrates with LLMs for code reviews.
 
-  - Alternatively, create a `.env` file in `SecureBYTE_Backend/` with:
-    ```env
-    FIREBASE_SERVICE_ACCOUNT=/absolute/path/to/firebase.json
-    GITHUB_CLIENT_ID=your_client_id
-    GITHUB_CLIENT_SECRET=your_client_secret
-    GITHUB_REDIRECT_URI=https://yourapp.example.com/callback
-    ```
-    The app will automatically load this file at startup.
+- If you’re new to Flask, skim the official tutorial to understand routes, requests, and responses: [Flask quickstart](https://flask.palletsprojects.com/).
+- A minimal Flask app looks like this:
+```python
+from flask import Flask
+app = Flask(__name__)
+
+@app.get("/")
+def home():
+    return "Hello from Flask!"
+```
+
+### Prerequisites
+- Python 3.10+ and `pip`
+- Git
+- A Firebase project with a Service Account JSON
+- Optional: Postman, curl
+
+### 1) Clone and enter the backend folder
+```sh
+git clone <your-monorepo-url>
+cd SecureBYTE_Backend
+```
+
+### 2) Create and activate a virtual environment
+- macOS/Linux:
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+```
+- Windows (PowerShell):
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+### 3) Install dependencies
+```sh
+pip install -r requirements.txt
+```
+
+### 4) Provide Firebase credentials
+Download your Firebase service account JSON, place it anywhere, and point the app to it via an environment variable.
+- macOS/Linux:
+```sh
+export FIREBASE_SERVICE_ACCOUNT="/absolute/path/to/firebase.json"
+```
+- Windows (PowerShell):
+```powershell
+$env:FIREBASE_SERVICE_ACCOUNT="C:\absolute\path\to\firebase.json"
+```
+Tip: If `firebase.json` is in this folder:
+```sh
+export FIREBASE_SERVICE_ACCOUNT="$(pwd)/firebase.json"
+```
+
+### 5) Optional: Configure a `.env` file
+Some features (e.g., GitHub OAuth, LLMs via `SecureBYTE_AI`) rely on environment variables. You can create a `.env` file in `SecureBYTE_Backend/` to load values at startup:
+```env
+GITHUB_CLIENT_ID=your_client_id
+GITHUB_CLIENT_SECRET=your_client_secret
+GITHUB_REDIRECT_URI=http://localhost:5173/auth/callback
+# LLM provider keys are read by SecureBYTE_AI/config.py (see that README)
+```
+See the Environment Variables section below for details.
+
+### 6) Run the server
+```sh
+python app.py
+```
+The app will start on `http://127.0.0.1:5000`. Test the health route:
+```sh
+curl http://127.0.0.1:5000/
+```
+
+### 7) Quickstart calls
+- Create a project:
+```sh
+curl -X POST http://127.0.0.1:5000/users/demo-user/projects \
+  -H "Content-Type: application/json" \
+  -d '{"project_name":"my-first-project","project_desc":"hello"}'
+```
+- Create a submission:
+```sh
+curl -X POST http://127.0.0.1:5000/users/demo-user/projects/<project_id>/submissions \
+  -H "Content-Type: application/json" \
+  -d '{"filename":"main.py","code":"print(42)"}'
+```
+
+### 8) Run tests (optional)
+Install pytest (dev only) and run:
+```sh
+pip install pytest
+pytest -q
+```
+
+### 9) Postman collection (optional)
+Import `postman/SecureBYTE_Review_Endpoints.postman_collection.json` into Postman to try the review endpoints.
+
+### Troubleshooting
+- If the app exits with “FIREBASE_SERVICE_ACCOUNT environment variable not set.”, ensure the env var points to your JSON and that the path is absolute.
+- Review endpoints require LLM keys configured in `SecureBYTE_AI`; without them you’ll see “LLM not available on server”.
+
+## Contributor Guide: How SecureBYTE Backend Works
+
+### Architecture at a glance
+- `app.py`: Single-file Flask app with all routes.
+- Storage: Firebase Realtime Database via `firebase_admin.db.reference`.
+- LLM integration: `SecureBYTE_AI.main.LLMManager`, prompts in `prompts/`.
+- Rate limiting: `Flask-Limiter` with global and per-route limits.
+- CORS: Enabled for all routes.
+- GitHub integration: OAuth token exchange, repo listing, project linking, and repo import.
+
+### Request flow for reviews
+1. Client calls a review endpoint.
+2. Handler validates/normalizes input and fetches the latest code from Firebase.
+3. `handle_llm_review()` loads the correct prompt, compresses code (`code_cleaner.compress_code`), and calls `llm.generate_response(...)`.
+4. The JSON response is stored:
+   - Project-level: `projects.{project_id}.securityrev`
+   - Submission-level: `submissions.{submission_id}.logicrev` or `testingrev`
+
+### Data model highlights
+- Project keeps an array of submission IDs in `fileids`.
+- Project-level `securityrev`; submission-level `logicrev` and `testingrev`.
+- Filenames are normalized to safe, POSIX-style relative paths.
+- Deprecated on submissions: `securityrev`, `reviewpdf` (ignored on update).
+
+### Rate limits
+- Global: 200/day, 50/hour.
+- Per review endpoint: 1 request per 5 seconds per client.
+
+### GitHub integration overview
+- `POST /auth/github/exchange-token`: swap code → access token.
+- `GET /users/{user_id}/github/repos`: list repos (requires `Authorization: Bearer <token>`).
+- `POST /users/{user_id}/projects/{project_id}/github/link`: store repo+branch on a project.
+- `POST /users/{user_id}/projects/{project_id}/github/import`: import repo files as submissions.
+
+### Adding a new endpoint (recipe)
+```python
+from firebase_admin import db
+from flask import request, jsonify
+
+@app.route('/users/<user_id>/examples', methods=['POST'])
+def create_example(user_id):
+    data = request.get_json(silent=True) or {}
+    if 'name' not in data:
+        return jsonify({'error': 'name is required'}), 400
+    ref = db.reference(f'users/{user_id}/examples')
+    ref.update({'last_created': get_timestamp(), 'name': data['name']})
+    return jsonify({'message': 'Example created'})
+```
+Guidelines:
+- Validate input early; return clear 400 errors.
+- Use `db.reference` with user-scoped paths.
+- Update `updated_at` timestamps when mutating resources.
+- Keep filenames relative and normalized (see `normalize_relative_path`).
+
+### Testing
+- Unit tests use pytest and mock Firebase/LLM to avoid external calls.
+- See `tests/test_logic_and_testing_reviews.py` and `tests/test_security_review.py` for fixtures/mocks and happy-path tests.
+- For quick manual testing, run `tests/manual_test_save_project.py` (uses live server via HTTP).
+
+### Contributing
+- Create a feature branch, make changes with clear commits, add/update tests when relevant, and open a pull request.
+- Keep code readable and follow existing patterns: early returns for errors, consistent JSON responses, and minimal side effects in handlers.
 
 ## Environment Variables
 - `FIREBASE_SERVICE_ACCOUNT`: Path to your Firebase service account JSON file. **Required.**
 - `GITHUB_CLIENT_ID`: GitHub OAuth app client ID. **Required for token exchange endpoint.**
 - `GITHUB_CLIENT_SECRET`: GitHub OAuth app client secret. **Required for token exchange endpoint.**
 - `GITHUB_REDIRECT_URI`: Redirect URI used in OAuth flow. **Optional if the frontend sends it in the request.**
-
-You can set these in your shell as shown above, or place them in a `.env` file in `SecureBYTE_Backend/`.
 
 ## Database Schema
 
@@ -76,7 +207,7 @@ users/
 
 Notes and deprecations:
 - Security reviews are stored on the project (`projects.{project_id}.securityrev`).
-- The following submission fields are deprecated and ignored on create and update: `securityrev`, `reviewpdf`.
+- The following submission fields are deprecated and ignored on update: `securityrev`, `reviewpdf`.
 - Filenames are stored as normalized, POSIX-style relative paths (no absolute paths or `..`).
 
 ## API Endpoints
@@ -116,30 +247,6 @@ Notes and deprecations:
   - **Response:** `{ "message": "Project and related submissions deleted successfully" }`
   - **Note:** This also deletes all submissions associated with the project
 
-#### Save Project Files
-- `PUT /users/{user_id}/projects/{project_id}/save`
-  - **Description:** Atomically save multiple edited files within a project. If any file fails validation, no updates are applied.
-  - **Body (array of files):**
-    ```json
-    [
-      {
-        "fileid": "<submission uuid>",
-        "filename": "relative/path/to/file.ext",
-        "code": "<updated file contents>"
-      }
-    ]
-    ```
-  - **Success Response:** `{ "message": "Project saved successfully" }`
-  - **Failure (400):**
-    ```json
-    {
-      "error": "Not all files could be saved",
-      "failed_files": [ { "fileid": "...", "filename": "...", "error": "..." } ],
-      "total_failed": 1,
-      "total_files": 3
-    }
-    ```
-
 ### Submissions
 
 #### Create Submission
@@ -149,11 +256,13 @@ Notes and deprecations:
     {
       "filename": "string (required)",
       "code": "string (optional)",
-      "testcases": ["array of strings (optional)"]
+      "securityrev": ["array of strings (optional)"],
+      "logicrev": ["array of strings (optional)"],
+      "testcases": ["array of strings (optional)"],
+      "reviewpdf": "string (optional)"
     }
     ```
   - **Response:** `{ "id": "<uuid>", "message": "Submission created successfully" }`
-  - **Notes:** Deprecated fields `securityrev` and `reviewpdf` are ignored.
 
 #### Get All Submissions for Project
 - `GET /users/{user_id}/projects/{project_id}/submissions`
@@ -316,3 +425,55 @@ All review endpoints are rate-limited to 1 request per 5 seconds per client. See
 - CORS is enabled for all routes.
 - Review endpoints are rate-limited to 1 request per 5 seconds. Global limits apply (200/day, 50/hour).
 - LLM provider keys are read by `SecureBYTE_AI/config.py` from environment variables; see `SecureBYTE_AI/README.md` for configuration.
+
+## Technical Resources
+
+Backend Development Learning Resource Guide — Prepared for BYTE TMU Contributor Team. These resources are free and organized from beginner to advanced.
+
+### Beginner Level
+
+**Recommended YouTube Courses**
+- [Back-End Development Full Course – Node.js, Express & MongoDB](https://www.youtube.com/watch?v=Oe421EPjeBE)
+- [Node.js Full Course 2024 | Complete Backend Development](https://www.youtube.com/watch?v=MIJt9H69QVc&utm_source=chatgpt.com)
+- [Python Backend Development Crash Course](https://www.youtube.com/watch?v=PtQiiknWUcI)
+- [Back-End Web Development (Tutorial for Beginners)](https://www.youtube.com/watch?v=1oTuMPIwHmk&utm_source=chatgpt.com)
+- [FreeCodeCamp: APIs & Microservices](https://www.youtube.com/watch?v=GZvSYJDk-us)
+
+**Reference Websites**
+- FreeCodeCamp Backend Curriculum
+- MDN Web Docs – Server-side Development
+
+### Intermediate Level
+
+**Recommended YouTube Courses**
+- [Backend Developer Roadmap 2023](https://www.youtube.com/watch?v=CWAi_2oLhYg&utm_source=chatgpt.com)
+- [Learn Python Backend by Building 3 Projects](https://www.youtube.com/watch?v=ftKiHCDVwfA&utm_source=chatgpt.com)
+- [REST API Tutorial – Python & Flask](https://www.youtube.com/watch?v=GMppyAPbLYk)
+- [Spring Boot Crash Course](https://www.youtube.com/watch?v=vtPkZShrvXQ)
+- [Build and Deploy a REST API (Node.js + Express + MongoDB)](https://www.youtube.com/watch?v=rOpEN1JDaD0&utm_source=chatgpt.com)
+
+**Reference Websites**
+- GeeksforGeeks – Backend Development Tutorials
+- DigitalOcean Tutorials
+
+### Advanced / Expert Level
+
+**Recommended YouTube Courses**
+- [System Design Basics – FreeCodeCamp](https://www.youtube.com/watch?v=MbjObHmDbZo)
+- [System Design Concepts & Interview Preparation](https://www.youtube.com/watch?v=F2FmTdLtb_4&utm_source=chatgpt.com)
+- [Advanced Backend Development Roadmap 2025](https://www.youtube.com/watch?v=CxmCUpGjIvo&utm_source=chatgpt.com)
+- [End-to-End Complete Advanced Backend Development (Algocamp)](https://www.youtube.com/watch?v=x4Kl3r3m8zw&utm_source=chatgpt.com)
+- [How Databases Work – FreeCodeCamp](https://www.youtube.com/watch?v=HXV3zeQKqGY)
+- [Event-Driven Microservices with Kafka](https://www.youtube.com/watch?v=R873BlNVUB4)
+
+**Reference Websites**
+- High Scalability Blog
+- Martin Fowler’s Blog
+- MDN Performance & Security Guides
+
+### Notes for Contributors
+
+- Begin with Beginner Level resources if you are new to backend development.
+- Progress to Intermediate once you are comfortable building and deploying basic APIs.
+- Move to Advanced resources for topics such as scalability, system design, and distributed architectures.
+- Contributors are encouraged to document what they learn and share insights with the team.
