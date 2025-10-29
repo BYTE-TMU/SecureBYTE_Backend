@@ -37,8 +37,8 @@ SERVICE_ACCOUNT_PATH = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
 if not SERVICE_ACCOUNT_PATH:
     raise RuntimeError('FIREBASE_SERVICE_ACCOUNT environment variable not set.')
 
-cred = credentials.Certificate("C:\\Projects\\Byte\\byte-9f8ea-firebase-adminsdk-fbsvc-f951fcf565.json")
-DATABASE_URL = ("https://byte-9f8ea-default-rtdb.firebaseio.com/")
+cred = credentials.Certificate(SERVICE_ACCOUNT_PATH)
+DATABASE_URL = "https://byte-b61ba-default-rtdb.firebaseio.com/"
 firebase_admin.initialize_app(cred, {
     'databaseURL': DATABASE_URL
 })
