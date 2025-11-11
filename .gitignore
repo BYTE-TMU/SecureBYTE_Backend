@@ -5,4 +5,7 @@ firebase.json
 .venv
 venv
 rtdb_migrate_to_v2.py
-__pycache__/
+__pycache__/FIREBASEKEY.json
+FIREBASEKEY.json
+FIREBASEKEY.json
+.DS_Store
