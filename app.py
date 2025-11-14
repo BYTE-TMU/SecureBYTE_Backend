@@ -927,6 +927,7 @@ def logic_review(user_id, submission_id):
         if llm_review.get('success') is False or 'error' in llm_review:
             return jsonify(llm_review), 400
         llm_review_obj = llm_review
+        llm_review_obj['review_time'] = get_timestamp()
         # Append new review and return success
         logic_rev = submission_data.get('logicrev', [])
         logic_rev.append({
@@ -952,6 +953,7 @@ def logic_review(user_id, submission_id):
     except Exception as e:
         return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
+    llm_review_obj['review_time'] = get_timestamp()
     # Append new review
     logic_rev = submission_data.get('logicrev', [])
     logic_rev.append({
@@ -994,6 +996,7 @@ def testing_review(user_id, submission_id):
         if llm_review.get('success') is False or 'error' in llm_review:
             return jsonify(llm_review), 400
         llm_review_obj = llm_review
+        llm_review_obj['review_time'] = get_timestamp()
         # Append new review and return success
         test_rev = submission_data.get('testingrev', [])
         test_rev.append({
@@ -1019,6 +1022,7 @@ def testing_review(user_id, submission_id):
     except Exception as e:
         return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
+    llm_review_obj['review_time'] = get_timestamp()
     # Append new review 
     test_rev = submission_data.get('testingrev', [])
     test_rev.append({
@@ -1074,6 +1078,7 @@ def security_review(user_id, project_id):
         if llm_review.get('success') is False or 'error' in llm_review:
             return jsonify(llm_review), 400
         llm_review_obj = llm_review
+        llm_review_obj['review_time'] = get_timestamp()
         # Append new review and return success
         sec_rev = project_data.get('securityrev', [])
         sec_rev.append({
@@ -1099,6 +1104,7 @@ def security_review(user_id, project_id):
     except Exception as e:
         return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
 
+    llm_review_obj['review_time'] = get_timestamp()
     # Append new review
     sec_rev = project_data.get('securityrev', [])
     sec_rev.append({
