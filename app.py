@@ -220,13 +220,56 @@ def create_project(user_id):
 
 @app.route('/users/<user_id>/projects', methods=['GET'])
 def get_projects(user_id):
-    """Get all projects for a specific user"""
+    """Get all projects for a specific user with optional sorting"""
     ref = db.reference(f'users/{user_id}/projects')
     projects = ref.get() or {}
     
     # Convert to list format
     result = list(projects.values())
-    return jsonify(result)
+    
+    # Get sorting parameters from query string
+    sort_by = request.args.get('sort_by', 'updated_at')  # default: sort by updated_at
+    order = request.args.get('order', 'desc')  # default: descending order
+    
+    # Define valid sort fields
+    valid_sort_fields = ['project_name', 'created_at', 'updated_at']
+    
+    # Validate sort_by parameter
+    if sort_by not in valid_sort_fields:
+        return jsonify({
+            'error': f'Invalid sort_by parameter. Valid options: {", ".join(valid_sort_fields)}'
+        }), 400
+    
+    # Validate order parameter
+    if order not in ['asc', 'desc']:
+        return jsonify({
+            'error': 'Invalid order parameter. Valid options: asc, desc'
+        }), 400
+    
+    # Sort the projects
+    try:
+        # Handle case where sort field might be missing in some projects
+        if sort_by == 'project_name':
+            # For string sorting (case-insensitive)
+            result.sort(
+                key=lambda x: (x.get(sort_by, '').lower() if x.get(sort_by) else ''),
+                reverse=(order == 'desc')
+            )
+        else:
+            # For date sorting
+            result.sort(
+                key=lambda x: x.get(sort_by, ''),
+                reverse=(order == 'desc')
+            )
+    except Exception as e:
+        return jsonify({'error': f'Sorting failed: {str(e)}'}), 500
+    
+    return jsonify({
+        'projects': result,
+        'sort_by': sort_by,
+        'order': order,
+        'total': len(result)
+    })
 
 @app.route('/users/<user_id>/projects/<project_id>', methods=['GET'])
 def get_project(user_id, project_id):

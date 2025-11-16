@@ -229,9 +229,42 @@ Notes and deprecations:
     ```
   - **Response:** `{ "projectid": "<uuid>", "message": "Project created successfully" }`
 
-#### Get All Projects for User
+#### Get All Projects for User (with Sorting)
 - `GET /users/{user_id}/projects`
-  - **Response:** Array of project objects
+  - **Query Parameters:**
+    - `sort_by` (optional): Field to sort by. Valid options: `project_name`, `created_at`, `updated_at` (default: `updated_at`)
+    - `order` (optional): Sort order. Valid options: `asc`, `desc` (default: `desc`)
+  - **Examples:**
+    ```
+    GET /users/u123/projects                                    # Default: sort by updated_at desc
+    GET /users/u123/projects?sort_by=project_name&order=asc    # Sort by name A-Z
+    GET /users/u123/projects?sort_by=project_name&order=desc   # Sort by name Z-A
+    GET /users/u123/projects?sort_by=created_at&order=asc      # Sort by creation date (oldest first)
+    GET /users/u123/projects?sort_by=created_at&order=desc     # Sort by creation date (newest first)
+    GET /users/u123/projects?sort_by=updated_at&order=desc     # Sort by last updated (newest first)
+    ```
+  - **Response:**
+    ```json
+    {
+      "projects": [
+        {
+          "projectid": "<uuid>",
+          "project_name": "Project Name",
+          "project_desc": "Description",
+          "fileids": [],
+          "created_at": "2025-01-01T00:00:00",
+          "updated_at": "2025-01-02T00:00:00"
+        }
+      ],
+      "sort_by": "project_name",
+      "order": "asc",
+      "total": 1
+    }
+    ```
+  - **Notes:**
+    - Project name sorting is case-insensitive
+    - Invalid `sort_by` or `order` values return 400 Bad Request
+    - Empty project lists are handled gracefully
 
 #### Get Specific Project
 - `GET /users/{user_id}/projects/{project_id}`
@@ -412,10 +445,11 @@ All review endpoints are rate-limited to 1 request per 5 seconds per client. See
 - **Array Support:** Arrays of review objects and optional `testcases` arrays.
 - **GitHub Linking:** Projects can be linked to repos; imports create submissions and update `fileids`.
 - **Path Normalization:** Uploaded/imported filenames are normalized to safe, relative paths.
+- **Project Sorting:** Projects can be sorted by name, creation date, or last updated date in ascending or descending order.
 
 ## Error Handling
 
-- **400 Bad Request:** Missing required fields
+- **400 Bad Request:** Missing required fields or invalid parameters
 - **404 Not Found:** Resource doesn't exist
 - **201 Created:** Successful resource creation
 - **200 OK:** Successful operation
