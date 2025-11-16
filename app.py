@@ -166,6 +166,28 @@ def readiness_check():
 def get_timestamp():
     return datetime.now().isoformat()
 
+# Helper constants and functions to validate file types
+allowed_file_types = {'.py', '.js', '.java', '.cpp', '.c', '.cs', '.rb', '.go', '.ts', '.php', '.html', '.css', '.json', '.xml', '.sh'}     
+max_file_size = 2 * 1024 * 1024  # 2 MB
+
+def allowed_file(filename):
+    _, ext = os.path.splitext(filename)
+    return ext.lower() in allowed_file_types
+
+def validate_file(storage):
+    """Validate file type and size"""
+    filename = storage.filename
+    if not allowed_file(filename):
+        return False, 'File type not allowed'
+    
+    # Check file size
+    storage.seek(0, os.SEEK_END)
+    size = storage.tell()
+    storage.seek(0)  # Reset file pointer
+    if size > max_file_size:
+        return False, 'File size exceeds limit of 2 MB'    
+    return None
+
 # Projects endpoints
 
 @app.route('/users/<user_id>/projects', methods=['POST'])
@@ -1408,6 +1430,10 @@ def upload_submissions_multipart(user_id, project_id):
     for idx, storage in enumerate(storage_files):
         if not storage:
             continue
+        # File type and size validation
+        upload_error = validate_file(storage)
+        if upload_error:
+            return jsonify({'error': upload_error}), 400
         proposed_path = rel_paths[idx] if idx < len(rel_paths) else storage.filename
         try:
             relpath = normalize_relative_path(proposed_path)
