@@ -17,6 +17,11 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from code_cleaner import compress_code
 from dotenv import load_dotenv
+import sys
+from datetime import datetime
+
+VERSION = "1.0.0"
+BUILD_TIME = datetime.now().isoformat()
 
 # Ensure project root is on sys.path so `SecureBYTE_AI` package is importable
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -92,6 +97,70 @@ def load_prompt(filename):
 @app.route('/')
 def home():
     return 'Welcome to SecureBYTE Backend!'
+
+ # Health check endpoint - simple alive check
+@app.route('/healthz', methods=['GET'])
+def health_check():
+    """
+    Health check endpoint - returns if service is alive
+    Used by load balancers and monitoring tools
+    """
+    return jsonify({
+        'status': 'healthy',
+        'service': 'SecureBYTE Backend',
+        'version': VERSION,
+        'timestamp': datetime.now().isoformat()
+    }), 200
+
+
+# Readiness check endpoint - checks dependencies
+@app.route('/readyz', methods=['GET'])
+def readiness_check():
+    """
+    Readiness check endpoint - verifies service can handle requests
+    Checks Firebase connection and LLM availability
+    Returns 200 if ready, 503 if not ready
+    """
+    checks = {
+        'firebase': False,
+        'llm': False,
+        'python_version': sys.version.split()[0]
+    }
+    
+    errors = []
+    
+    # Check Firebase connection
+    try:
+        test_ref = db.reference('_health_check')
+        test_ref.get()
+        checks['firebase'] = True
+    except Exception as e:
+        errors.append(f"Firebase connection failed: {str(e)}")
+        checks['firebase'] = False
+    
+    # Check LLM availability (optional)
+    try:
+        from SecureBYTE_AI.main import LLMManager
+        checks['llm'] = True
+    except Exception as e:
+        checks['llm'] = False
+        errors.append(f"LLM not available: {str(e)}")
+    
+    # Service is ready if Firebase is connected
+    is_ready = checks['firebase']
+    
+    response = {
+        'status': 'ready' if is_ready else 'not_ready',
+        'service': 'SecureBYTE Backend',
+        'version': VERSION,
+        'build_time': BUILD_TIME,
+        'timestamp': datetime.now().isoformat(),
+        'checks': checks,
+        'errors': errors if errors else []
+    }
+    
+    status_code = 200 if is_ready else 503
+    return jsonify(response), status_code
 
 # Helper function to get current timestamp
 def get_timestamp():
