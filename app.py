@@ -17,11 +17,15 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from code_cleaner import compress_code
 from dotenv import load_dotenv
+
+from services.memory_service import MemoryService
+
 import sys
 from datetime import datetime
 
 VERSION = "1.0.0"
 BUILD_TIME = datetime.now().isoformat()
+
 
 # Ensure project root is on sys.path so `SecureBYTE_AI` package is importable
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -43,7 +47,10 @@ if not SERVICE_ACCOUNT_PATH:
     raise RuntimeError('FIREBASE_SERVICE_ACCOUNT environment variable not set.')
 
 cred = credentials.Certificate(SERVICE_ACCOUNT_PATH)
-DATABASE_URL = "https://byte-b61ba-default-rtdb.firebaseio.com/"
+DATABASE_URL = os.environ.get('FIREBASE_DATABASE_URL')
+if not DATABASE_URL:
+    raise RuntimeError('FIREBASE_DATABASE_URL environment variable not set.')
+
 firebase_admin.initialize_app(cred, {
     'databaseURL': DATABASE_URL
 })
@@ -86,6 +93,18 @@ if LLM_AVAILABLE and LLMManager:
     except Exception as e:
         print(f"Failed to initialize LLM Manager: {e}")
         llm = None
+
+# Initialize Memory Service with PersistentClient
+memory_service = None
+try:
+    memory_service = MemoryService(persist_directory="./chroma_db")
+    print("Memory service initialized successfully (PersistentClient)")
+    print("✓ Data will persist across server restarts")
+    stats = memory_service.get_collection_stats()
+    print(f"Memory stats: {stats}")
+except Exception as e:
+    print(f"Warning: Could not initialize memory service: {e}")
+    memory_service = None
 
 #prompt loader helper function
 def load_prompt(filename):
@@ -889,7 +908,7 @@ def get_dashboard_summary(user_id):
 # Common Route handler for LLM reviews 
 
 def handle_llm_review(review_type, user_id, project_or_submission_id, data):
-    """Handle LLM review requests"""
+    """Handle LLM review requests with memory context"""
 
     PROMPT_PATHS = {
         "logic": "prompts/logic_prompt.txt",
@@ -900,6 +919,7 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     if review_type not in PROMPT_PATHS:
         return {"success": False, "error": "Invalid review type"}
 
+    # Process code based on review type
     if review_type == "security":
         # For security reviews, data is an array of files
         files_data = data
@@ -908,14 +928,15 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         
         for file_data in files_data:
             original_code = file_data.get('code', '')
-
             # Clean the code before sending to LLM
             cleaned_code = compress_code(original_code)
-           
             file_data['code'] = cleaned_code
 
         # Convert the files array to JSON string for the prompt
         code = json.dumps(files_data, indent=2)
+        project_id = project_or_submission_id
+        submission_id = None
+        submission_data = None
         
     else:
         # For logic and testing reviews, data should have code
@@ -929,6 +950,65 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
 
         if not code:
             return {"success": False, "error": "Missing code in request body"}
+        
+        submission_id = project_or_submission_id
+        # Get project_id from submission
+        submission_ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
+        submission_data = submission_ref.get()
+        project_id = submission_data.get('projectid') if submission_data else None
+
+    # ===== GET MEMORY CONTEXT =====
+    context_prompt = ""
+    if memory_service and project_id:
+        try:
+            enhanced_context = memory_service.get_enhanced_context(
+                user_id=user_id,
+                project_id=project_id,
+                current_code=code,
+                review_type=review_type
+            )
+            
+            context_parts = []
+            
+            # Similar code
+            if enhanced_context.get('similar_code'):
+                context_parts.append("\n## Previously Reviewed Similar Code:")
+                for idx, similar in enumerate(enhanced_context['similar_code'][:2], 1):
+                    context_parts.append(
+                        f"\n{idx}. File: {similar['metadata'].get('filename', 'unknown')} "
+                        f"(similarity: {1 - similar.get('distance', 1):.2%})"
+                    )
+            
+            # Past issues
+            if enhanced_context.get('past_issues'):
+                context_parts.append("\n## Similar Issues Found Previously:")
+                for idx, issue in enumerate(enhanced_context['past_issues'][:3], 1):
+                    meta = issue['metadata']
+                    severity = meta.get('severity', meta.get('function', 'unknown'))
+                    context_parts.append(
+                        f"\n{idx}. {severity} - {issue['document'][:150]}..."
+                    )
+            
+            # Project context
+            if enhanced_context.get('project_context'):
+                proj_meta = enhanced_context['project_context']['metadata']
+                context_parts.append(
+                    f"\n## Project: {proj_meta.get('project_name', 'unknown')} "
+                    f"({proj_meta.get('file_count', 0)} files)"
+                )
+            
+            if context_parts:
+                context_prompt = (
+                    "\n\n" + "="*60 + 
+                    "\n## HISTORICAL CONTEXT FROM PREVIOUS REVIEWS\n" +
+                    "(Use this to identify patterns and recurring issues)\n" +
+                    "="*60 + 
+                    "".join(context_parts) + 
+                    "\n" + "="*60 + "\n\n"
+                )
+        
+        except Exception as e:
+            print(f"Warning: Failed to get memory context: {e}")
 
     if llm is None:
         return {"success": False, "error": "LLM not available on server"}
@@ -936,7 +1016,15 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     try:   
         # Load the correct prompt template for the review type
         prompt_template = load_prompt(PROMPT_PATHS[review_type])
-
+        
+        # Inject memory context if available
+        if context_prompt:
+            # Add context instruction to the prompt
+            prompt_template = prompt_template.replace(
+                "The source code for this file is provided below:",
+                "The source code for this file is provided below.\n" + context_prompt
+            )
+        
         # Inject the code into the template
         prompt = prompt_template.replace('{code}', code)
 
@@ -944,25 +1032,74 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         response = llm.generate_response(user_prompt=prompt)
         print(f"response: {response}")
 
-        # If LLM returns a dict/list, pass it through as JSON-compatible
+        # Handle response (existing logic)
         if isinstance(response, (dict, list)):
-            return response
-
-        # Handle both string and generator responses
-        if hasattr(response, 'system_prompt'):
+            llm_review_obj = response
+        elif hasattr(response, 'system_prompt'):
             try:
-                return ''.join(response.system_prompt)
+                llm_review_obj = ''.join(response.system_prompt)
             except Exception:
-                return str(response)
-
-        # If bytes, decode; else coerce to string
-        if isinstance(response, (bytes, bytearray)):
+                llm_review_obj = str(response)
+        elif isinstance(response, (bytes, bytearray)):
             try:
-                return response.decode('utf-8', errors='ignore')
+                llm_review_obj = response.decode('utf-8', errors='ignore')
             except Exception:
-                return str(response)
+                llm_review_obj = str(response)
+        else:
+            llm_review_obj = str(response)
+        
+        # Try to parse as JSON
+        if isinstance(llm_review_obj, str):
+            try:
+                llm_review_obj = json.loads(llm_review_obj)
+            except:
+                pass
 
-        return str(response)
+        # ===== STORE IN MEMORY =====
+        if memory_service and isinstance(llm_review_obj, dict):
+            try:
+                if review_type == "security":
+                    memory_service.store_security_review(
+                        user_id=user_id,
+                        project_id=project_id,
+                        review_data=llm_review_obj
+                    )
+                    print(f"✓ Stored security review in memory")
+                
+                elif review_type == "logic" and submission_id:
+                    memory_service.store_logic_review(
+                        user_id=user_id,
+                        submission_id=submission_id,
+                        project_id=project_id,
+                        review_data=llm_review_obj
+                    )
+                    print(f"✓ Stored logic review in memory")
+                
+                elif review_type == "testing" and submission_id:
+                    memory_service.store_logic_review(
+                        user_id=user_id,
+                        submission_id=submission_id,
+                        project_id=project_id,
+                        review_data=llm_review_obj
+                    )
+                    print(f"✓ Stored testing review in memory")
+                
+                # Store code submission
+                if submission_id and submission_data:
+                    memory_service.store_code_submission(
+                        user_id=user_id,
+                        submission_id=submission_id,
+                        project_id=project_id,
+                        filename=submission_data.get('filename', 'unknown'),
+                        code=code,
+                        language=None
+                    )
+                    print(f"✓ Stored code submission in memory")
+            
+            except Exception as e:
+                print(f"Warning: Failed to store in memory: {e}")
+        
+        return llm_review_obj
         
     
     except Exception as e:
@@ -1686,6 +1823,107 @@ def import_github_repo(user_id, project_id):
         project_ref.update({'fileids': fileids, 'updated_at': get_timestamp()})
         print(f"[IMPORT] Import complete: {created} files imported, updating project fileids")
         return jsonify({'message': 'Import complete', 'files_imported': created, 'truncated_fallback_used': truncated})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ==================== MEMORY MANAGEMENT ENDPOINTS ====================
+
+@app.route('/users/<user_id>/memory/stats', methods=['GET'])
+def get_memory_stats(user_id):
+    """Get memory statistics for a user"""
+    if not memory_service:
+        return jsonify({'error': 'Memory service not available'}), 503
+    
+    try:
+        stats = memory_service.get_collection_stats()
+        user_stats = memory_service.get_user_stats(user_id)
+        
+        return jsonify({
+            'success': True,
+            'global_stats': stats,
+            'user_stats': user_stats
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/users/<user_id>/memory/similar-code', methods=['POST'])
+def find_similar_code(user_id):
+    """Find similar code from memory"""
+    if not memory_service:
+        return jsonify({'error': 'Memory service not available'}), 503
+    
+    try:
+        data = request.get_json() or {}
+        code = data.get('code', '')
+        project_id = data.get('project_id')
+        n_results = min(data.get('n_results', 5), 20)  # Cap at 20
+        
+        if not code:
+            return jsonify({'error': 'Code is required'}), 400
+        
+        similar = memory_service.get_similar_code(
+            user_id=user_id,
+            code=code,
+            project_id=project_id,
+            n_results=n_results
+        )
+        
+        return jsonify({
+            'success': True,
+            'results': similar,
+            'count': len(similar)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/users/<user_id>/memory/clear', methods=['DELETE'])
+def clear_user_memory(user_id):
+    """Clear all memory data for a user (GDPR compliance)"""
+    if not memory_service:
+        return jsonify({'error': 'Memory service not available'}), 503
+    
+    try:
+        # Optional: require confirmation token
+        data = request.get_json() or {}
+        confirm = data.get('confirm', False)
+        
+        if not confirm:
+            return jsonify({
+                'error': 'Confirmation required. Send {"confirm": true} to delete all user memory data.'
+            }), 400
+        
+        deleted_counts = memory_service.clear_user_data(user_id)
+        
+        return jsonify({
+            'success': True,
+            'message': 'All memory data cleared for user',
+            'deleted': deleted_counts
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/users/<user_id>/projects/<project_id>/memory/context', methods=['GET'])
+def get_project_memory_context(user_id, project_id):
+    """Get enhanced memory context for a project"""
+    if not memory_service:
+        return jsonify({'error': 'Memory service not available'}), 503
+    
+    try:
+        # Optional: get sample code from query param
+        sample_code = request.args.get('code', '')
+        review_type = request.args.get('review_type', 'logic')
+        
+        enhanced_context = memory_service.get_enhanced_context(
+            user_id=user_id,
+            project_id=project_id,
+            current_code=sample_code,
+            review_type=review_type
+        )
+        
+        return jsonify({
+            'success': True,
+            'context': enhanced_context
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

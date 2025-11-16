@@ -6,3 +6,4 @@ firebase.json
 venv
 rtdb_migrate_to_v2.py
 __pycache__/
+chroma_db/
