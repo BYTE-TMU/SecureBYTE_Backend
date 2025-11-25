@@ -18,15 +18,6 @@ from flask_limiter.util import get_remote_address
 from code_cleaner import compress_code
 from dotenv import load_dotenv
 
-from services.memory_service import MemoryService
-
-import sys
-from datetime import datetime
-
-VERSION = "1.0.0"
-BUILD_TIME = datetime.now().isoformat()
-
-
 # Ensure project root is on sys.path so `SecureBYTE_AI` package is importable
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
@@ -47,10 +38,7 @@ if not SERVICE_ACCOUNT_PATH:
     raise RuntimeError('FIREBASE_SERVICE_ACCOUNT environment variable not set.')
 
 cred = credentials.Certificate(SERVICE_ACCOUNT_PATH)
-DATABASE_URL = os.environ.get('FIREBASE_DATABASE_URL')
-if not DATABASE_URL:
-    raise RuntimeError('FIREBASE_DATABASE_URL environment variable not set.')
-
+DATABASE_URL = "https://byte-b61ba-default-rtdb.firebaseio.com/"
 firebase_admin.initialize_app(cred, {
     'databaseURL': DATABASE_URL
 })
@@ -94,18 +82,6 @@ if LLM_AVAILABLE and LLMManager:
         print(f"Failed to initialize LLM Manager: {e}")
         llm = None
 
-# Initialize Memory Service with PersistentClient
-memory_service = None
-try:
-    memory_service = MemoryService(persist_directory="./chroma_db")
-    print("Memory service initialized successfully (PersistentClient)")
-    print("✓ Data will persist across server restarts")
-    stats = memory_service.get_collection_stats()
-    print(f"Memory stats: {stats}")
-except Exception as e:
-    print(f"Warning: Could not initialize memory service: {e}")
-    memory_service = None
-
 #prompt loader helper function
 def load_prompt(filename):
     with open(filename, 'r', encoding='utf-8') as f:
@@ -115,75 +91,34 @@ def load_prompt(filename):
 
 @app.route('/')
 def home():
-    return 'Welcome to SecureBYTE Backend!'
-
- # Health check endpoint - simple alive check
-@app.route('/healthz', methods=['GET'])
-def health_check():
-    """
-    Health check endpoint - returns if service is alive
-    Used by load balancers and monitoring tools
-    """
-    return jsonify({
-        'status': 'healthy',
-        'service': 'SecureBYTE Backend',
-        'version': VERSION,
-        'timestamp': datetime.now().isoformat()
-    }), 200
-
-
-# Readiness check endpoint - checks dependencies
-@app.route('/readyz', methods=['GET'])
-def readiness_check():
-    """
-    Readiness check endpoint - verifies service can handle requests
-    Checks Firebase connection and LLM availability
-    Returns 200 if ready, 503 if not ready
-    """
-    checks = {
-        'firebase': False,
-        'llm': False,
-        'python_version': sys.version.split()[0]
-    }
-    
-    errors = []
-    
-    # Check Firebase connection
-    try:
-        test_ref = db.reference('_health_check')
-        test_ref.get()
-        checks['firebase'] = True
-    except Exception as e:
-        errors.append(f"Firebase connection failed: {str(e)}")
-        checks['firebase'] = False
-    
-    # Check LLM availability (optional)
-    try:
-        from SecureBYTE_AI.main import LLMManager
-        checks['llm'] = True
-    except Exception as e:
-        checks['llm'] = False
-        errors.append(f"LLM not available: {str(e)}")
-    
-    # Service is ready if Firebase is connected
-    is_ready = checks['firebase']
-    
-    response = {
-        'status': 'ready' if is_ready else 'not_ready',
-        'service': 'SecureBYTE Backend',
-        'version': VERSION,
-        'build_time': BUILD_TIME,
-        'timestamp': datetime.now().isoformat(),
-        'checks': checks,
-        'errors': errors if errors else []
-    }
-    
-    status_code = 200 if is_ready else 503
-    return jsonify(response), status_code
+    return success({'message': 'Welcome to SecureBYTE Backend!'}, meta={'version': '2.0', 'status': 'operational'})
 
 # Helper function to get current timestamp
 def get_timestamp():
     return datetime.now().isoformat()
+
+# Unified response helpers for consistent API shape
+def success(data=None, meta=None, status=200):
+    """Return standardized success response"""
+    payload = {"success": True}
+    if data is not None:
+        payload["data"] = data
+    if meta is not None:
+        payload["meta"] = meta
+    return jsonify(payload), status
+
+def error(message, code="bad_request", detail=None, status=400):
+    """Return standardized error response"""
+    payload = {
+        "success": False,
+        "error": {
+            "code": code,
+            "message": message
+        }
+    }
+    if detail is not None:
+        payload["error"]["detail"] = detail
+    return jsonify(payload), status
 
 # Projects endpoints
 
@@ -194,7 +129,7 @@ def create_project(user_id):
     
     # Validate required fields
     if not data.get('project_name'):
-        return jsonify({'error': 'project_name is required'}), 400
+        return error('project_name is required', code='validation_error', status=400)
     
     # Generate project ID
     project_id = str(uuid.uuid4())
@@ -213,63 +148,17 @@ def create_project(user_id):
     ref = db.reference(f'users/{user_id}/projects/{project_id}')
     ref.set(project_data)
     
-    return jsonify({
-        'projectid': project_id,
-        'message': 'Project created successfully'
-    }), 201
+    return success({'projectid': project_id}, meta={'message': 'Project created successfully'}, status=201)
 
 @app.route('/users/<user_id>/projects', methods=['GET'])
 def get_projects(user_id):
-    """Get all projects for a specific user with optional sorting"""
+    """Get all projects for a specific user"""
     ref = db.reference(f'users/{user_id}/projects')
     projects = ref.get() or {}
     
     # Convert to list format
     result = list(projects.values())
-    
-    # Get sorting parameters from query string
-    sort_by = request.args.get('sort_by', 'updated_at')  # default: sort by updated_at
-    order = request.args.get('order', 'desc')  # default: descending order
-    
-    # Define valid sort fields
-    valid_sort_fields = ['project_name', 'created_at', 'updated_at']
-    
-    # Validate sort_by parameter
-    if sort_by not in valid_sort_fields:
-        return jsonify({
-            'error': f'Invalid sort_by parameter. Valid options: {", ".join(valid_sort_fields)}'
-        }), 400
-    
-    # Validate order parameter
-    if order not in ['asc', 'desc']:
-        return jsonify({
-            'error': 'Invalid order parameter. Valid options: asc, desc'
-        }), 400
-    
-    # Sort the projects
-    try:
-        # Handle case where sort field might be missing in some projects
-        if sort_by == 'project_name':
-            # For string sorting (case-insensitive)
-            result.sort(
-                key=lambda x: (x.get(sort_by, '').lower() if x.get(sort_by) else ''),
-                reverse=(order == 'desc')
-            )
-        else:
-            # For date sorting
-            result.sort(
-                key=lambda x: x.get(sort_by, ''),
-                reverse=(order == 'desc')
-            )
-    except Exception as e:
-        return jsonify({'error': f'Sorting failed: {str(e)}'}), 500
-    
-    return jsonify({
-        'projects': result,
-        'sort_by': sort_by,
-        'order': order,
-        'total': len(result)
-    })
+    return success(result)
 
 @app.route('/users/<user_id>/projects/<project_id>', methods=['GET'])
 def get_project(user_id, project_id):
@@ -278,9 +167,9 @@ def get_project(user_id, project_id):
     project = ref.get()
     
     if not project:
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
     
-    return jsonify(project)
+    return success(project)
 
 @app.route('/users/<user_id>/projects/<project_id>', methods=['PUT'])
 def update_project(user_id, project_id):
@@ -294,10 +183,10 @@ def update_project(user_id, project_id):
     
     # Check if project exists
     if not ref.get():
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
     
     ref.update(data)
-    return jsonify({'message': 'Project updated successfully'})
+    return success(meta={'message': 'Project updated successfully'})
 
 @app.route('/users/<user_id>/projects/<project_id>', methods=['DELETE'])
 def delete_project(user_id, project_id):
@@ -307,7 +196,7 @@ def delete_project(user_id, project_id):
     # Check if project exists
     project = project_ref.get()
     if not project:
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
     
     # Delete all submissions for this project
     submissions_ref = db.reference(f'users/{user_id}/submissions')
@@ -320,7 +209,41 @@ def delete_project(user_id, project_id):
     # Delete the project
     project_ref.delete()
     
-    return jsonify({'message': 'Project and related submissions deleted successfully'})
+    return success(meta={'message': 'Project and related submissions deleted successfully'})
+
+@app.route('/users/<user_id>/projects_delete', methods=['DELETE'])
+def delete_projects(user_id):
+    """Batch delete projects and all their submissions."""
+
+    data = request.get_json() or {}
+    ids = data.get("ids", [])
+
+    if not ids:
+        return error("No project IDs provided", code="bad_request", status=400)
+
+    for project_id in ids:
+        project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
+        project = project_ref.get()
+
+        # Skip if not found 
+        if not project:
+            continue
+
+        # Delete matching submissions
+        submissions_ref = db.reference(f'users/{user_id}/submissions')
+        submissions = submissions_ref.get() or {}
+
+        for submission_id, submission in submissions.items():
+            if submission.get('projectid') == project_id:
+                db.reference(
+                    f'users/{user_id}/submissions/{submission_id}'
+                ).delete()
+
+        # Delete the project
+        project_ref.delete()
+
+    return success(meta={"message": "Projects and related submissions deleted successfully"})
+
 
 @app.route('/users/<user_id>/projects/<project_id>/save', methods=['PUT'])
 def save_project(user_id, project_id):
@@ -329,13 +252,13 @@ def save_project(user_id, project_id):
 
     # Basic payload validation
     if not isinstance(data, list):
-        return jsonify({'error': 'Request body must be a JSON array of files'}), 400
+        return error('Request body must be a JSON array of files', code='validation_error', status=400)
 
     project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
 
     # Check if project exists
     if not project_ref.get():
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
 
     failed_files = []
     candidates = []  # Collect valid updates before applying (atomic behavior)
@@ -373,12 +296,12 @@ def save_project(user_id, project_id):
 
     # If any files failed in validation, return error without applying any updates
     if failed_files:
-        return jsonify({
-            'error': 'Not all files could be saved',
-            'failed_files': failed_files,
-            'total_failed': len(failed_files),
-            'total_files': len(data)
-        }), 400
+        return error(
+            'Not all files could be saved',
+            code='partial_failure',
+            detail={'failed_files': failed_files, 'total_failed': len(failed_files), 'total_files': len(data)},
+            status=400
+        )
 
     # Second pass: apply all staged updates
     for item in candidates:
@@ -387,7 +310,7 @@ def save_project(user_id, project_id):
     # Update project's updated_at timestamp
     project_ref.update({'updated_at': get_timestamp()})
 
-    return jsonify({'message': 'Project saved successfully'})
+    return success(meta={'message': 'Project saved successfully'})
 
 
 # Submissions endpoints
@@ -399,13 +322,13 @@ def create_submission(user_id, project_id):
     
     # Validate required fields
     if not data.get('filename'):
-        return jsonify({'error': 'filename is required'}), 400
+        return error('filename is required', code='validation_error', status=400)
     
     # Check if project exists
     project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
     project = project_ref.get()
     if not project:
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
     
     # Generate submission ID
     submission_id = str(uuid.uuid4())
@@ -434,10 +357,7 @@ def create_submission(user_id, project_id):
         'updated_at': get_timestamp()
     })
     
-    return jsonify({
-        'id': submission_id,
-        'message': 'Submission created successfully'
-    }), 201
+    return success({'id': submission_id}, meta={'message': 'Submission created successfully'}, status=201)
 
 @app.route('/users/<user_id>/projects/<project_id>/submissions', methods=['GET'])
 def get_project_submissions(user_id, project_id):
@@ -445,7 +365,7 @@ def get_project_submissions(user_id, project_id):
     # Check if project exists
     project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
     if not project_ref.get():
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
     
     # Get submissions for this project
     submissions_ref = db.reference(f'users/{user_id}/submissions')
@@ -457,7 +377,7 @@ def get_project_submissions(user_id, project_id):
         if submission.get('projectid') == project_id:
             project_submissions.append(submission)
     
-    return jsonify(project_submissions)
+    return success(project_submissions)
 
 @app.route('/users/<user_id>/submissions/<submission_id>', methods=['GET'])
 def get_submission(user_id, submission_id):
@@ -466,9 +386,9 @@ def get_submission(user_id, submission_id):
     submission = ref.get()
     
     if not submission:
-        return jsonify({'error': 'Submission not found'}), 404
+        return error('Submission not found', code='not_found', status=404)
     
-    return jsonify(submission)
+    return success(submission)
 
 # Get only the code of a specific submission
 @app.route('/users/<user_id>/submissions/<submission_id>/code', methods=['GET'])
@@ -478,9 +398,9 @@ def get_submission_code(user_id, submission_id):
     submission = ref.get()
     
     if not submission:
-        return jsonify({'error': 'Submission not found'}), 404
+        return error('Submission not found', code='not_found', status=404)
     print( "SUBMISSION CODE" , submission.get('code', ''))
-    return jsonify({'code': submission.get('code', '')})
+    return success({'code': submission.get('code', '')})
 
 @app.route('/users/<user_id>/submissions/<submission_id>', methods=['PUT'])
 def update_submission(user_id, submission_id):
@@ -499,10 +419,10 @@ def update_submission(user_id, submission_id):
     
     # Check if submission exists
     if not ref.get():
-        return jsonify({'error': 'Submission not found'}), 404
+        return error('Submission not found', code='not_found', status=404)
     
     ref.update(data)
-    return jsonify({'message': 'Submission updated successfully'})
+    return success(meta={'message': 'Submission updated successfully'})
 
 @app.route('/users/<user_id>/submissions/<submission_id>', methods=['DELETE'])
 def delete_submission(user_id, submission_id):
@@ -512,7 +432,7 @@ def delete_submission(user_id, submission_id):
     # Check if submission exists
     submission = submission_ref.get()
     if not submission:
-        return jsonify({'error': 'Submission not found'}), 404
+        return error('Submission not found', code='not_found', status=404)
     
     project_id = submission.get('projectid')
     
@@ -532,7 +452,7 @@ def delete_submission(user_id, submission_id):
     # Delete the submission
     submission_ref.delete()
     
-    return jsonify({'message': 'Submission deleted successfully'})
+    return success(meta={'message': 'Submission deleted successfully'})
 
 
 # History endpoints
@@ -593,7 +513,7 @@ def get_user_history(user_id):
     # Sort by timestamp (newest first)
     history.sort(key=lambda x: x['timestamp'], reverse=True)
     
-    return jsonify(history)
+    return success(history)
 
 @app.route('/users/<user_id>/projects/<project_id>/history', methods=['GET'])
 def get_project_history(user_id, project_id):
@@ -602,7 +522,7 @@ def get_project_history(user_id, project_id):
     project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
     project = project_ref.get()
     if not project:
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
     
     # Get all submissions for this project
     submissions_ref = db.reference(f'users/{user_id}/submissions')
@@ -649,7 +569,7 @@ def get_project_history(user_id, project_id):
     # Sort by timestamp (newest first)
     history.sort(key=lambda x: x['timestamp'], reverse=True)
     
-    return jsonify(history)
+    return success(history)
 
 # Metrics endpoints
 
@@ -733,7 +653,7 @@ def get_user_metrics(user_id):
         }
     }
     
-    return jsonify(metrics)
+    return success(metrics)
 
 @app.route('/users/<user_id>/projects/<project_id>/metrics', methods=['GET'])
 def get_project_metrics(user_id, project_id):
@@ -742,7 +662,7 @@ def get_project_metrics(user_id, project_id):
     project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
     project = project_ref.get()
     if not project:
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
     
     # Get submissions for this project
     submissions_ref = db.reference(f'users/{user_id}/submissions')
@@ -803,7 +723,7 @@ def get_project_metrics(user_id, project_id):
         'updated_at': project.get('updated_at', '')
     }
     
-    return jsonify(metrics)
+    return success(metrics)
 
 # Dashboard endpoints
 
@@ -881,7 +801,7 @@ def get_user_dashboard(user_id):
         'recent_submissions': recent_submissions
     }
     
-    return jsonify(dashboard_data)
+    return success(dashboard_data)
 
 @app.route('/users/<user_id>/dashboard/summary', methods=['GET'])
 def get_dashboard_summary(user_id):
@@ -946,12 +866,12 @@ def get_dashboard_summary(user_id):
         'critical_issues': critical_issues
     }
     
-    return jsonify(summary)
+    return success(summary)
 
 # Common Route handler for LLM reviews 
 
 def handle_llm_review(review_type, user_id, project_or_submission_id, data):
-    """Handle LLM review requests with memory context"""
+    """Handle LLM review requests"""
 
     PROMPT_PATHS = {
         "logic": "prompts/logic_prompt.txt",
@@ -962,7 +882,6 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     if review_type not in PROMPT_PATHS:
         return {"success": False, "error": "Invalid review type"}
 
-    # Process code based on review type
     if review_type == "security":
         # For security reviews, data is an array of files
         files_data = data
@@ -971,15 +890,14 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
         
         for file_data in files_data:
             original_code = file_data.get('code', '')
+
             # Clean the code before sending to LLM
             cleaned_code = compress_code(original_code)
+           
             file_data['code'] = cleaned_code
 
         # Convert the files array to JSON string for the prompt
         code = json.dumps(files_data, indent=2)
-        project_id = project_or_submission_id
-        submission_id = None
-        submission_data = None
         
     else:
         # For logic and testing reviews, data should have code
@@ -993,65 +911,6 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
 
         if not code:
             return {"success": False, "error": "Missing code in request body"}
-        
-        submission_id = project_or_submission_id
-        # Get project_id from submission
-        submission_ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
-        submission_data = submission_ref.get()
-        project_id = submission_data.get('projectid') if submission_data else None
-
-    # ===== GET MEMORY CONTEXT =====
-    context_prompt = ""
-    if memory_service and project_id:
-        try:
-            enhanced_context = memory_service.get_enhanced_context(
-                user_id=user_id,
-                project_id=project_id,
-                current_code=code,
-                review_type=review_type
-            )
-            
-            context_parts = []
-            
-            # Similar code
-            if enhanced_context.get('similar_code'):
-                context_parts.append("\n## Previously Reviewed Similar Code:")
-                for idx, similar in enumerate(enhanced_context['similar_code'][:2], 1):
-                    context_parts.append(
-                        f"\n{idx}. File: {similar['metadata'].get('filename', 'unknown')} "
-                        f"(similarity: {1 - similar.get('distance', 1):.2%})"
-                    )
-            
-            # Past issues
-            if enhanced_context.get('past_issues'):
-                context_parts.append("\n## Similar Issues Found Previously:")
-                for idx, issue in enumerate(enhanced_context['past_issues'][:3], 1):
-                    meta = issue['metadata']
-                    severity = meta.get('severity', meta.get('function', 'unknown'))
-                    context_parts.append(
-                        f"\n{idx}. {severity} - {issue['document'][:150]}..."
-                    )
-            
-            # Project context
-            if enhanced_context.get('project_context'):
-                proj_meta = enhanced_context['project_context']['metadata']
-                context_parts.append(
-                    f"\n## Project: {proj_meta.get('project_name', 'unknown')} "
-                    f"({proj_meta.get('file_count', 0)} files)"
-                )
-            
-            if context_parts:
-                context_prompt = (
-                    "\n\n" + "="*60 + 
-                    "\n## HISTORICAL CONTEXT FROM PREVIOUS REVIEWS\n" +
-                    "(Use this to identify patterns and recurring issues)\n" +
-                    "="*60 + 
-                    "".join(context_parts) + 
-                    "\n" + "="*60 + "\n\n"
-                )
-        
-        except Exception as e:
-            print(f"Warning: Failed to get memory context: {e}")
 
     if llm is None:
         return {"success": False, "error": "LLM not available on server"}
@@ -1059,124 +918,111 @@ def handle_llm_review(review_type, user_id, project_or_submission_id, data):
     try:   
         # Load the correct prompt template for the review type
         prompt_template = load_prompt(PROMPT_PATHS[review_type])
-        
-        # Inject memory context if available
-        if context_prompt:
-            # Add context instruction to the prompt
-            prompt_template = prompt_template.replace(
-                "The source code for this file is provided below:",
-                "The source code for this file is provided below.\n" + context_prompt
-            )
-        
+
         # Inject the code into the template
         prompt = prompt_template.replace('{code}', code)
 
         # Generate response from LLM
-        response = llm.generate_response(user_prompt=prompt)
-        print(f"response: {response}")
+        llm_response = llm.generate_response(user_prompt=prompt)
+        print(f"[RAW] Original LLM response type: {type(llm_response)}")
+        print(f"[RAW] First 200 chars: {str(llm_response)[:200]}")
 
-        # Handle response (existing logic)
-        if isinstance(response, (dict, list)):
-            llm_review_obj = response
-        elif hasattr(response, 'system_prompt'):
+        # If LLM returns a dict/list, pass it through as JSON-compatible
+        if isinstance(llm_response, (dict, list)):
+            print("[CLEAN] LLM returned dict/list directly")
+            return llm_response
+
+        # Convert to string
+        if hasattr(llm_response, 'system_prompt'):
             try:
-                llm_review_obj = ''.join(response.system_prompt)
+                response_str = ''.join(llm_response.system_prompt)
             except Exception:
-                llm_review_obj = str(response)
-        elif isinstance(response, (bytes, bytearray)):
+                response_str = str(llm_response)
+        elif isinstance(llm_response, (bytes, bytearray)):
             try:
-                llm_review_obj = response.decode('utf-8', errors='ignore')
+                response_str = llm_response.decode('utf-8', errors='ignore')
             except Exception:
-                llm_review_obj = str(response)
+                response_str = str(llm_response)
         else:
-            llm_review_obj = str(response)
-        
-        # Try to parse as JSON
-        if isinstance(llm_review_obj, str):
-            try:
-                llm_review_obj = json.loads(llm_review_obj)
-            except:
-                pass
+            response_str = str(llm_response)
 
-        # ===== STORE IN MEMORY =====
-        if memory_service and isinstance(llm_review_obj, dict):
-            try:
-                if review_type == "security":
-                    memory_service.store_security_review(
-                        user_id=user_id,
-                        project_id=project_id,
-                        review_data=llm_review_obj
-                    )
-                    print(f"✓ Stored security review in memory")
-                
-                elif review_type == "logic" and submission_id:
-                    memory_service.store_logic_review(
-                        user_id=user_id,
-                        submission_id=submission_id,
-                        project_id=project_id,
-                        review_data=llm_review_obj
-                    )
-                    print(f"✓ Stored logic review in memory")
-                
-                elif review_type == "testing" and submission_id:
-                    memory_service.store_logic_review(
-                        user_id=user_id,
-                        submission_id=submission_id,
-                        project_id=project_id,
-                        review_data=llm_review_obj
-                    )
-                    print(f"✓ Stored testing review in memory")
-                
-                # Store code submission
-                if submission_id and submission_data:
-                    memory_service.store_code_submission(
-                        user_id=user_id,
-                        submission_id=submission_id,
-                        project_id=project_id,
-                        filename=submission_data.get('filename', 'unknown'),
-                        code=code,
-                        language=None
-                    )
-                    print(f"✓ Stored code submission in memory")
-            
-            except Exception as e:
-                print(f"Warning: Failed to store in memory: {e}")
+        print(f"[CLEAN] After string conversion: {len(response_str)} chars")
+
+        # Strip markdown code fences if present
+        response_str = response_str.strip()
+        if response_str.startswith('```json'):
+            response_str = response_str[7:]
+            print("[CLEAN] Removed ```json prefix")
+        elif response_str.startswith('```'):
+            response_str = response_str[3:]
+            print("[CLEAN] Removed ``` prefix")
         
-        return llm_review_obj
+        # Find and remove closing ``` and any text after it
+        closing_fence = response_str.find('```')
+        if closing_fence != -1:
+            response_str = response_str[:closing_fence]
+            print(f"[CLEAN] Removed ``` at position {closing_fence}")
+        
+        response_str = response_str.strip()
+        
+        # Extract JSON object if LLM added explanatory text before/after
+        first_brace = response_str.find('{')
+        last_brace = response_str.rfind('}')
+        
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            response_str = response_str[first_brace:last_brace + 1]
+            print(f"[CLEAN] Extracted JSON from position {first_brace} to {last_brace}")
+        else:
+            print(f"[CLEAN] WARNING: No braces found! first={first_brace}, last={last_brace}")
+        
+        response_str = response_str.strip()
+        print(f"[CLEAN] Final cleaned response: {len(response_str)} chars")
+        print(f"[CLEAN] First 100 chars: {response_str[:100]}")
+
+        return response_str
         
     
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        return {"success": False, "error": str(e)}
 
 
 # Route for logic review
 @app.route('/users/<user_id>/submissions/<submission_id>/logic-review', methods=['POST'])
 @limiter.limit("1 per 5 seconds") 
 def logic_review(user_id, submission_id):
+    """Generate logic review for a submission"""
+    try:
+        ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
 
-    # Update the submission to be the latest version
+        # Check if submission exists
+        submission_data = ref.get()
+        if not submission_data:
+            return error('Submission not found', code='not_found', status=404)
 
-    update_submission(user_id, submission_id)
-
-    ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
-
-    # Check if submission exists
-    submission_data = ref.get()
-    if not submission_data:
-        return jsonify({'error': 'Submission not found'}), 404
-
-    #get response from llm
-    llm_review = handle_llm_review("logic", user_id, submission_id, request.get_json())
+        # Get response from llm
+        request_data = request.get_json()
+        print(f"[LOGIC REVIEW] Request data: {request_data}")
+        llm_review = handle_llm_review("logic", user_id, submission_id, request_data)
+        print(f"[LOGIC REVIEW] LLM review response: {llm_review}")
+    except Exception as e:
+        print(f"[LOGIC REVIEW ERROR] Exception: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return error(f'Internal server error: {str(e)}', code='internal_error', status=500)
 
     # Normalize LLM output and handle errors consistently
     if isinstance(llm_review, tuple):
-        return llm_review
+        # Legacy safety net; convert to error if present
+        try:
+            resp, status_code = llm_review
+            return error('LLM error', code='llm_error', detail=getattr(resp, 'json', lambda: str(resp))(), status=status_code)
+        except Exception:
+            return error('LLM error', code='llm_error', status=500)
     if isinstance(llm_review, dict):
         # Treat dict as success unless it explicitly signals an error
         if llm_review.get('success') is False or 'error' in llm_review:
-            return jsonify(llm_review), 400
+            return error(llm_review.get('error', 'LLM error'), code='llm_error', status=400)
         llm_review_obj = llm_review
-        llm_review_obj['review_time'] = get_timestamp()
         # Append new review and return success
         logic_rev = submission_data.get('logicrev', [])
         logic_rev.append({
@@ -1185,8 +1031,7 @@ def logic_review(user_id, submission_id):
         ref.update({
             "logicrev": logic_rev
         })
-        return jsonify({
-            "success": True,
+        return success({
             "review_type": "logic",
             "user_id": user_id,
             "submission_id": submission_id,
@@ -1200,9 +1045,8 @@ def logic_review(user_id, submission_id):
     try:
         llm_review_obj = json.loads(str(llm_review))
     except Exception as e:
-        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
+        return error('Invalid JSON returned from LLM', code='llm_invalid_json', detail=str(e), status=500)
 
-    llm_review_obj['review_time'] = get_timestamp()
     # Append new review
     logic_rev = submission_data.get('logicrev', [])
     logic_rev.append({
@@ -1212,8 +1056,7 @@ def logic_review(user_id, submission_id):
         "logicrev": logic_rev
     })
 
-    return jsonify({
-        "success": True,
+    return success({
         "review_type": "logic",
         "user_id": user_id,
         "submission_id": submission_id,
@@ -1224,28 +1067,38 @@ def logic_review(user_id, submission_id):
 @app.route('/users/<user_id>/submissions/<submission_id>/testing-review', methods=['POST'])
 @limiter.limit("1 per 5 seconds") 
 def testing_review(user_id, submission_id):
-    
-    # Update the submission to be the latest version
-    update_submission(user_id, submission_id)
-    
-    ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
-    
-    # Check if submission exists
-    submission_data = ref.get()
-    if not submission_data:
-        return jsonify({'error': 'Submission not found'}), 404
+    """Generate test cases for a submission"""
+    try:
+        ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
+        
+        # Check if submission exists
+        submission_data = ref.get()
+        if not submission_data:
+            return error('Submission not found', code='not_found', status=404)
 
-    llm_review = handle_llm_review("testing", user_id, submission_id, request.get_json())
+        # Get response from llm
+        request_data = request.get_json()
+        print(f"[TESTING REVIEW] Request data: {request_data}")
+        llm_review = handle_llm_review("testing", user_id, submission_id, request_data)
+        print(f"[TESTING REVIEW] LLM review response type: {type(llm_review)}")
+    except Exception as e:
+        print(f"[TESTING REVIEW ERROR] Exception: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return error(f'Internal server error: {str(e)}', code='internal_error', status=500)
 
     # Normalize LLM output and handle errors consistently
     if isinstance(llm_review, tuple):
-        return llm_review
+        try:
+            resp, status_code = llm_review
+            return error('LLM error', code='llm_error', detail=getattr(resp, 'json', lambda: str(resp))(), status=status_code)
+        except Exception:
+            return error('LLM error', code='llm_error', status=500)
     if isinstance(llm_review, dict):
         # Treat dict as success unless it explicitly signals an error
         if llm_review.get('success') is False or 'error' in llm_review:
-            return jsonify(llm_review), 400
+            return error(llm_review.get('error', 'LLM error'), code='llm_error', status=400)
         llm_review_obj = llm_review
-        llm_review_obj['review_time'] = get_timestamp()
         # Append new review and return success
         test_rev = submission_data.get('testingrev', [])
         test_rev.append({
@@ -1254,8 +1107,7 @@ def testing_review(user_id, submission_id):
         ref.update({
             "testingrev": test_rev
         })
-        return jsonify({
-            "success": True,
+        return success({
             "review_type": "testing",
             "user_id": user_id,
             "submission_id": submission_id,
@@ -1269,9 +1121,10 @@ def testing_review(user_id, submission_id):
     try:
         llm_review_obj = json.loads(str(llm_review))
     except Exception as e:
-        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
+        print(f"[TESTING REVIEW ERROR] JSON parse failed: {str(e)}")
+        print(f"[TESTING REVIEW ERROR] Attempted to parse: {str(llm_review)[:500]}")
+        return error('Invalid JSON returned from LLM', code='llm_invalid_json', detail=str(e), status=500)
 
-    llm_review_obj['review_time'] = get_timestamp()
     # Append new review 
     test_rev = submission_data.get('testingrev', [])
     test_rev.append({
@@ -1281,8 +1134,7 @@ def testing_review(user_id, submission_id):
         "testingrev": test_rev
     })
 
-    return jsonify({
-        "success": True,
+    return success({
         "review_type": "testing",
         "user_id": user_id,
         "submission_id": submission_id,
@@ -1301,7 +1153,7 @@ def security_review(user_id, project_id):
     # Check if project exists
     project_data = ref.get()
     if not project_data:
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
     
     #extract a list of fileids to be sent to LLM 
     file_ids = project_data.get('fileids', [])
@@ -1321,13 +1173,16 @@ def security_review(user_id, project_id):
 
     # Normalize LLM output and handle errors consistently
     if isinstance(llm_review, tuple):
-        return llm_review
+        try:
+            resp, status_code = llm_review
+            return error('LLM error', code='llm_error', detail=getattr(resp, 'json', lambda: str(resp))(), status=status_code)
+        except Exception:
+            return error('LLM error', code='llm_error', status=500)
     if isinstance(llm_review, dict):
         # Treat dict as success unless it explicitly signals an error
         if llm_review.get('success') is False or 'error' in llm_review:
-            return jsonify(llm_review), 400
+            return error(llm_review.get('error', 'LLM error'), code='llm_error', status=400)
         llm_review_obj = llm_review
-        llm_review_obj['review_time'] = get_timestamp()
         # Append new review and return success
         sec_rev = project_data.get('securityrev', [])
         sec_rev.append({
@@ -1336,8 +1191,7 @@ def security_review(user_id, project_id):
         ref.update({
             "securityrev": sec_rev
         })  
-        return jsonify({
-            "success": True,
+        return success({
             "review_type": "security",
             "user_id": user_id,
             "project_id": project_id,
@@ -1351,9 +1205,8 @@ def security_review(user_id, project_id):
     try:
         llm_review_obj = json.loads(str(llm_review))
     except Exception as e:
-        return jsonify({'error': 'Invalid JSON returned from LLM', 'detail': str(e)}), 500
+        return error('Invalid JSON returned from LLM', code='llm_invalid_json', detail=str(e), status=500)
 
-    llm_review_obj['review_time'] = get_timestamp()
     # Append new review
     sec_rev = project_data.get('securityrev', [])
     sec_rev.append({
@@ -1363,8 +1216,7 @@ def security_review(user_id, project_id):
         "securityrev": sec_rev
     })  
 
-    return jsonify({
-        "success": True,
+    return success({
         "review_type": "security",
         "user_id": user_id,
         "project_id": project_id,
@@ -1396,9 +1248,9 @@ def github_exchange_token():
     code = data.get('code')
     redirect_uri = data.get('redirect_uri') or GITHUB_REDIRECT_URI
     if not code:
-        return jsonify({'error': 'code is required'}), 400
+        return error('code is required', code='validation_error', status=400)
     if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
-        return jsonify({'error': 'Server missing GitHub OAuth configuration'}), 500
+        return error('Server missing GitHub OAuth configuration', code='server_misconfig', status=500)
     try:
         resp = requests.post(
             'https://github.com/login/oauth/access_token',
@@ -1414,20 +1266,20 @@ def github_exchange_token():
         resp.raise_for_status()
         payload = resp.json()
         if 'error' in payload:
-            return jsonify({'error': payload.get('error_description') or payload.get('error')}), 400
-        return jsonify({
+            return error(payload.get('error_description') or payload.get('error'), code='oauth_error', status=400)
+        return success({
             'access_token': payload.get('access_token'),
             'token_type': payload.get('token_type'),
             'scope': payload.get('scope')
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return error(str(e), code='oauth_exchange_failed', status=502)
 
 @app.route('/users/<user_id>/github/repos', methods=['GET'])
 def list_github_repos(user_id):
     token = extract_github_token()
     if not token:
-        return jsonify({'error': 'Missing GitHub access token'}), 401
+        return error('Missing GitHub access token', code='unauthorized', status=401)
     per_page = request.args.get('per_page', default=100, type=int)
     page = request.args.get('page', default=1, type=int)
     try:
@@ -1438,7 +1290,7 @@ def list_github_repos(user_id):
             timeout=15
         )
         if resp.status_code == 401:
-            return jsonify({'error': 'Invalid GitHub token'}), 401
+            return error('Invalid GitHub token', code='unauthorized', status=401)
         resp.raise_for_status()
         repos = resp.json()
         simplified = []
@@ -1457,9 +1309,9 @@ def list_github_repos(user_id):
                     'login': (r.get('owner') or {}).get('login')
                 }
             })
-        return jsonify(simplified)
+        return success(simplified)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return error(str(e), code='github_list_failed', status=502)
 
 def get_project_ref(user_id, project_id):
     return db.reference(f'users/{user_id}/projects/{project_id}')
@@ -1508,12 +1360,12 @@ def create_submissions_batch(user_id, project_id):
     max_bytes = data.get('max_bytes')
 
     if not isinstance(files, list) or len(files) == 0:
-        return jsonify({'error': 'files must be a non-empty array'}), 400
+        return error('files must be a non-empty array', code='validation_error', status=400)
 
     project_ref = get_project_ref(user_id, project_id)
     project = project_ref.get()
     if not project:
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
 
     created = 0
     created_ids = []
@@ -1558,7 +1410,7 @@ def create_submissions_batch(user_id, project_id):
             break
 
     project_ref.update({'fileids': fileids, 'updated_at': get_timestamp()})
-    return jsonify({'message': 'Batch upload complete', 'created': created, 'created_ids': created_ids}), 201
+    return success({'created': created, 'created_ids': created_ids}, meta={'message': 'Batch upload complete'}, status=201)
 
 @app.route('/users/<user_id>/projects/<project_id>/submissions/upload', methods=['POST'])
 def upload_submissions_multipart(user_id, project_id):
@@ -1573,7 +1425,7 @@ def upload_submissions_multipart(user_id, project_id):
     project_ref = get_project_ref(user_id, project_id)
     project = project_ref.get()
     if not project:
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
 
     storage_files = request.files.getlist('files')
     rel_paths_raw = request.form.get('relative_paths', '')
@@ -1628,7 +1480,7 @@ def upload_submissions_multipart(user_id, project_id):
             break
 
     project_ref.update({'fileids': fileids, 'updated_at': get_timestamp()})
-    return jsonify({'message': 'Upload complete', 'created': created, 'created_ids': created_ids}), 201
+    return success({'created': created, 'created_ids': created_ids}, meta={'message': 'Upload complete'}, status=201)
 
 @app.route('/users/<user_id>/projects/<project_id>/github/link', methods=['POST'])
 def link_github_repo(user_id, project_id):
@@ -1640,10 +1492,10 @@ def link_github_repo(user_id, project_id):
     project_ref = get_project_ref(user_id, project_id)
     project = project_ref.get()
     if not project:
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
 
     if not repo_full_name:
-        return jsonify({'error': 'repo_full_name is required'}), 400
+        return error('repo_full_name is required', code='validation_error', status=400)
 
     default_branch = None
     if token:
@@ -1654,13 +1506,13 @@ def link_github_repo(user_id, project_id):
                 timeout=15
             )
             if check.status_code == 404:
-                return jsonify({'error': 'Repository not found'}), 404
+                return error('Repository not found', code='not_found', status=404)
             if check.status_code == 401:
-                return jsonify({'error': 'Invalid GitHub token'}), 401
+                return error('Invalid GitHub token', code='unauthorized', status=401)
             check.raise_for_status()
             default_branch = (check.json() or {}).get('default_branch')
         except Exception as e:
-            return jsonify({'error': f'Failed to verify repo: {str(e)}'}), 502
+            return error(f'Failed to verify repo: {str(e)}', code='github_repo_verify_failed', status=502)
 
     if not branch:
         branch = default_branch or 'main'
@@ -1671,7 +1523,7 @@ def link_github_repo(user_id, project_id):
         'linked_at': get_timestamp()
     }
     project_ref.update({'github': github_link, 'updated_at': get_timestamp()})
-    return jsonify({'message': 'Repository linked', 'github': github_link})
+    return success({'github': github_link}, meta={'message': 'Repository linked'})
 
 @app.route('/users/<user_id>/projects/<project_id>/github/import', methods=['POST'])
 def import_github_repo(user_id, project_id):
@@ -1679,7 +1531,7 @@ def import_github_repo(user_id, project_id):
     token = extract_github_token()
     if not token:
         print("[IMPORT] No GitHub token found")
-        return jsonify({'error': 'Missing GitHub access token'}), 401
+        return error('Missing GitHub access token', code='unauthorized', status=401)
     
     print(f"[IMPORT] Using GitHub token: {token[:10]}..." if token else "[IMPORT] No token")
 
@@ -1693,13 +1545,13 @@ def import_github_repo(user_id, project_id):
     project_ref = get_project_ref(user_id, project_id)
     project = project_ref.get()
     if not project:
-        return jsonify({'error': 'Project not found'}), 404
+        return error('Project not found', code='not_found', status=404)
 
     if not repo_full_name:
         linked = project.get('github') or {}
         repo_full_name = linked.get('repo_full_name')
     if not repo_full_name:
-        return jsonify({'error': 'repo_full_name is required (or link the project first)'}), 400
+        return error('repo_full_name is required (or link the project first)', code='validation_error', status=400)
 
     if not branch:
         # Prefer linked branch if available, else repo default
@@ -1717,7 +1569,7 @@ def import_github_repo(user_id, project_id):
                 branch = 'main'
 
     if not repo_full_name:
-        return jsonify({'error': 'repo_full_name is required (or link the project first)'}), 400
+        return error('repo_full_name is required (or link the project first)', code='validation_error', status=400)
 
     try:
         tree_url = f'https://api.github.com/repos/{repo_full_name}/git/trees/{branch}'
@@ -1746,9 +1598,9 @@ def import_github_repo(user_id, project_id):
                 )
                 branch = default_branch
             else:
-                return jsonify({'error': 'Repository or branch not found'}), 404
+                return error('Repository or branch not found', code='not_found', status=404)
         if tree_resp.status_code == 401:
-            return jsonify({'error': 'Invalid GitHub token'}), 401
+            return error('Invalid GitHub token', code='unauthorized', status=401)
         tree_resp.raise_for_status()
         tree_payload = tree_resp.json()
         tree = tree_payload.get('tree', [])
@@ -1865,110 +1717,13 @@ def import_github_repo(user_id, project_id):
 
         project_ref.update({'fileids': fileids, 'updated_at': get_timestamp()})
         print(f"[IMPORT] Import complete: {created} files imported, updating project fileids")
-        return jsonify({'message': 'Import complete', 'files_imported': created, 'truncated_fallback_used': truncated})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# ==================== MEMORY MANAGEMENT ENDPOINTS ====================
-
-@app.route('/users/<user_id>/memory/stats', methods=['GET'])
-def get_memory_stats(user_id):
-    """Get memory statistics for a user"""
-    if not memory_service:
-        return jsonify({'error': 'Memory service not available'}), 503
-    
-    try:
-        stats = memory_service.get_collection_stats()
-        user_stats = memory_service.get_user_stats(user_id)
-        
-        return jsonify({
-            'success': True,
-            'global_stats': stats,
-            'user_stats': user_stats
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/users/<user_id>/memory/similar-code', methods=['POST'])
-def find_similar_code(user_id):
-    """Find similar code from memory"""
-    if not memory_service:
-        return jsonify({'error': 'Memory service not available'}), 503
-    
-    try:
-        data = request.get_json() or {}
-        code = data.get('code', '')
-        project_id = data.get('project_id')
-        n_results = min(data.get('n_results', 5), 20)  # Cap at 20
-        
-        if not code:
-            return jsonify({'error': 'Code is required'}), 400
-        
-        similar = memory_service.get_similar_code(
-            user_id=user_id,
-            code=code,
-            project_id=project_id,
-            n_results=n_results
+        return success(
+            {'files_imported': created, 'truncated_fallback_used': truncated},
+            meta={'message': 'Import complete'},
+            status=201
         )
-        
-        return jsonify({
-            'success': True,
-            'results': similar,
-            'count': len(similar)
-        })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/users/<user_id>/memory/clear', methods=['DELETE'])
-def clear_user_memory(user_id):
-    """Clear all memory data for a user (GDPR compliance)"""
-    if not memory_service:
-        return jsonify({'error': 'Memory service not available'}), 503
-    
-    try:
-        # Optional: require confirmation token
-        data = request.get_json() or {}
-        confirm = data.get('confirm', False)
-        
-        if not confirm:
-            return jsonify({
-                'error': 'Confirmation required. Send {"confirm": true} to delete all user memory data.'
-            }), 400
-        
-        deleted_counts = memory_service.clear_user_data(user_id)
-        
-        return jsonify({
-            'success': True,
-            'message': 'All memory data cleared for user',
-            'deleted': deleted_counts
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/users/<user_id>/projects/<project_id>/memory/context', methods=['GET'])
-def get_project_memory_context(user_id, project_id):
-    """Get enhanced memory context for a project"""
-    if not memory_service:
-        return jsonify({'error': 'Memory service not available'}), 503
-    
-    try:
-        # Optional: get sample code from query param
-        sample_code = request.args.get('code', '')
-        review_type = request.args.get('review_type', 'logic')
-        
-        enhanced_context = memory_service.get_enhanced_context(
-            user_id=user_id,
-            project_id=project_id,
-            current_code=sample_code,
-            review_type=review_type
-        )
-        
-        return jsonify({
-            'success': True,
-            'context': enhanced_context
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return error(str(e), code='github_import_failed', status=502)
 
 if __name__ == '__main__':
     app.run(debug=True)
