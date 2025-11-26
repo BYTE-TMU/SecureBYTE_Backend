@@ -32,6 +32,11 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# Ensure the SecureBYTE_AI package root is on sys.path for its absolute imports (e.g., `from config import ...`)
+ai_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'SecureBYTE_AI'))
+if ai_root not in sys.path:
+    sys.path.insert(0, ai_root)
+
 try:
     from SecureBYTE_AI.main import LLMManager
     LLM_AVAILABLE = True
