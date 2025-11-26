@@ -3,6 +3,8 @@ import firebase_admin
 from firebase_admin import credentials, db
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
+from pathlib import Path
+from flask import request, jsonify
 import os
 import sys
 import uuid
@@ -17,6 +19,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from code_cleaner import compress_code
 from dotenv import load_dotenv
+from file_tree_tokens import generate_file_tree_json, build_tree
 
 from services.memory_service import MemoryService
 
@@ -650,6 +653,21 @@ def get_project_history(user_id, project_id):
     history.sort(key=lambda x: x['timestamp'], reverse=True)
     
     return jsonify(history)
+
+@app.route("/file-tree", methods=["GET"])
+def file_tree_endpoint():
+    root = request.args.get("path", ".")
+    try:
+        chars = int(request.args.get("chars_per_token", "4"))
+    except ValueError:
+        chars = 4
+
+    try:
+        data = generate_file_tree_json(root, chars)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify(data)
 
 # Metrics endpoints
 
