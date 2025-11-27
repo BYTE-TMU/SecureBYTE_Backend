@@ -45,10 +45,11 @@
                   "  pm.response.to.have.status(201);",
                   "});",
                   "try {",
-                  "  var data = pm.response.json();",
-                  "  if (data && data.projectid) {",
-                  "    pm.collectionVariables.set('project_id', data.projectid);",
-                  "    console.log('project_id set to', data.projectid);",
+              "  var body = pm.response.json();",
+              "  var projectId = body && body.data && body.data.projectid;",
+              "  if (projectId) {",
+              "    pm.collectionVariables.set('project_id', projectId);",
+              "    console.log('project_id set to', projectId);",
                   "  }",
                   "} catch (e) {",
                   "  console.warn('Response not JSON');",
@@ -157,6 +158,25 @@
                 "{{user_id}}",
                 "projects",
                 "{{project_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Projects",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/projects",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "projects"
               ]
             }
           },
@@ -350,6 +370,64 @@
                 "{{user_id}}",
                 "projects",
                 "{{project_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Batch Delete Projects",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Ensure at least one project_id is set; run Setup → Create Project first if needed.",
+                  "if (!pm.collectionVariables.get('project_id')) {",
+                  "  throw new Error('project_id is not set. Run Setup → Create Project first to get a sample ID.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "try {",
+                  "  var data = pm.response.json();",
+                  "  pm.test('Response indicates success', function () {",
+                  "    pm.expect(data.success).to.be.true;",
+                  "  });",
+                  "} catch (e) {",
+                  "  console.warn('Response not JSON or missing success flag');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ids\": [\n    \"{{project_id}}\"\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/projects_delete",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "projects_delete"
               ]
             }
           },
