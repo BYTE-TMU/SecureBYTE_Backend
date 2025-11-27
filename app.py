@@ -221,6 +221,8 @@ def delete_projects(user_id):
     if not ids:
         return error("No project IDs provided", code="bad_request", status=400)
 
+    deleted_projects = 0
+
     for project_id in ids:
         project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
         project = project_ref.get()
@@ -241,8 +243,21 @@ def delete_projects(user_id):
 
         # Delete the project
         project_ref.delete()
+        deleted_projects += 1
 
-    return success(meta={"message": "Projects and related submissions deleted successfully"})
+    if deleted_projects == 0:
+        # Nothing matched the provided IDs – surface this clearly to the client
+        return error(
+            "No matching projects found for provided IDs",
+            code="not_found",
+            status=404,
+        )
+
+    return success(
+        meta={
+            "message": f"Deleted {deleted_projects} project(s) and related submissions successfully"
+        }
+    )
 
 
 @app.route('/users/<user_id>/projects/<project_id>/save', methods=['PUT'])
