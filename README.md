@@ -280,6 +280,19 @@ Notes and deprecations:
   - **Response:** `{ "message": "Project and related submissions deleted successfully" }`
   - **Note:** This also deletes all submissions associated with the project
 
+#### Delete Multiple Projects (Batch)
+- `DELETE /users/{user_id}/projects_delete`
+  - **Body:**
+    ```json
+    {
+      "ids": ["<project_id_1>", "<project_id_2>"]
+    }
+    ```
+  - **Response:** `{ "message": "Deleted N project(s) and related submissions successfully" }`
+  - **Notes:**
+    - If `ids` is missing or empty, the server returns **400 Bad Request**.
+    - If none of the provided IDs match existing projects, the server returns **404 Not Found** and does not delete anything.
+
 ### Submissions
 
 #### Create Submission
