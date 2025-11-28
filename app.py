@@ -477,6 +477,60 @@ def delete_submission(user_id, submission_id):
     
     return success(meta={'message': 'Submission deleted successfully'})
 
+@app.route('/users/<user_id>/submissions_delete', methods=['DELETE'])
+def delete_submissions(user_id):
+    """Batch delete submissions from a project"""
+
+    data = request.get_json() or {}
+    ids = data.get("ids", [])
+
+    if not ids:
+        return error("No submission IDs provided", code="bad_request", status=400)
+
+    deleted_submissions = 0
+
+    for submission_id in ids:
+        # Delete matching submissions
+        submission_ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
+        
+        # Check if submission exists
+        submission = submission_ref.get()
+        if not submission:
+            return error('Submission not found', code='not_found', status=404)
+        
+        project_id = submission.get('projectid')
+        
+        # Remove submission ID from project's fileids
+        if project_id:
+            project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
+            project = project_ref.get()
+            if project:
+                fileids = project.get('fileids', [])
+                if submission_id in fileids:
+                    fileids.remove(submission_id)
+                    project_ref.update({
+                        'fileids': fileids,
+                        'updated_at': get_timestamp()
+                    })
+        
+        # Delete the submission
+        submission_ref.delete()
+
+        deleted_submissions += 1
+
+        if deleted_submissions == 0:
+        # Nothing matched the provided IDs – surface this clearly to the client
+            return error(
+                "No matching projects found for provided IDs",
+                code="not_found",
+                status=404,
+            )      
+
+    return success(
+        meta={
+            "message": f"Deleted {deleted_submissions} project(s) and related submissions successfully"
+        }
+    )    
 
 # History endpoints
 
