@@ -492,14 +492,14 @@ def delete_submissions(user_id):
     for submission_id in ids:
         # Delete matching submissions
         submission_ref = db.reference(f'users/{user_id}/submissions/{submission_id}')
-        
-        # Check if submission exists
+
+        # Check if submission exists; skip missing IDs to allow partial success
         submission = submission_ref.get()
         if not submission:
-            return error('Submission not found', code='not_found', status=404)
-        
+            continue
+
         project_id = submission.get('projectid')
-        
+
         # Remove submission ID from project's fileids
         if project_id:
             project_ref = db.reference(f'users/{user_id}/projects/{project_id}')
@@ -512,25 +512,24 @@ def delete_submissions(user_id):
                         'fileids': fileids,
                         'updated_at': get_timestamp()
                     })
-        
+
         # Delete the submission
         submission_ref.delete()
-
         deleted_submissions += 1
 
-        if deleted_submissions == 0:
+    if deleted_submissions == 0:
         # Nothing matched the provided IDs – surface this clearly to the client
-            return error(
-                "No matching projects found for provided IDs",
-                code="not_found",
-                status=404,
-            )      
+        return error(
+            "No matching submissions found for provided IDs",
+            code="not_found",
+            status=404,
+        )
 
     return success(
         meta={
-            "message": f"Deleted {deleted_submissions} project(s) and related submissions successfully"
+            "message": f"Deleted {deleted_submissions} submission(s) successfully"
         }
-    )    
+    )
 
 # History endpoints
 
