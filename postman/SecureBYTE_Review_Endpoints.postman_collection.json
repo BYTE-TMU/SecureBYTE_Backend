@@ -432,6 +432,64 @@
             }
           },
           "response": []
+        },
+        {
+          "name": "Batch Delete Submissions",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Ensure at least one submission_id is set; run Setup → Create Submission first if needed.",
+                  "if (!pm.collectionVariables.get('submission_id')) {",
+                  "  throw new Error('submission_id is not set. Run Setup → Create Submission first to get a sample ID.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "try {",
+                  "  var data = pm.response.json();",
+                  "  pm.test('Response indicates success', function () {",
+                  "    pm.expect(data.success).to.be.true;",
+                  "  });",
+                  "} catch (e) {",
+                  "  console.warn('Response not JSON or missing success flag');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ids\": [\n    \"{{submission_id}}\"\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/submissions_delete",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "submissions_delete"
+              ]
+            }
+          },
+          "response": []
         }
       ]
     }
